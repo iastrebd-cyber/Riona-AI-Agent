@@ -29,11 +29,21 @@ app.use(helmet({
     contentSecurityPolicy: {
         directives: {
             ...helmet.contentSecurityPolicy.getDefaultDirectives(),
-            "script-src": ["'self'", "'unsafe-inline'"],
+            // 'unsafe-eval' + unpkg are required by the i.front.html chat client,
+            // which loads React/Babel from a CDN and compiles JSX in the browser.
+            "script-src": ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://unpkg.com"],
+            "style-src": ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+            "font-src": ["'self'", "https://fonts.gstatic.com"],
         },
     },
 }));
-app.use(cors());
+// Reflect the request origin and allow credentials so the JWT cookie is
+// accepted on cross-origin requests (a wildcard '*' origin forbids credentials).
+// Set CLIENT_ORIGIN in production to lock this down to a known front-end URL.
+app.use(cors({
+    origin: process.env.CLIENT_ORIGIN || true,
+    credentials: true,
+}));
 app.use(express.json()); // JSON body parsing
 app.use(express.urlencoded({ extended: true, limit: "1kb" })); // URL-encoded data
 app.use(cookieParser()); // Cookie parsing
@@ -49,6 +59,12 @@ app.use(express.static('frontend/dist'));
 
 // API Routes
 app.use('/api', apiRoutes);
+
+// Standalone single-file chat client (served from the project root, same origin
+// as /api so the JWT cookie flows without any CORS/credentials concerns).
+app.get(['/chat', '/i.front.html'], (_req, res) => {
+    res.sendFile('i.front.html', { root: process.cwd() });
+});
 
 app.get('*', (_req, res) => {
     res.sendFile('index.html', { root: 'frontend/dist' });
