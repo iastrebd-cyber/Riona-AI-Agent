@@ -11,23 +11,23 @@ export async function Instagram_cookiesExist(): Promise<boolean> {
     const cookiesData = await fs.readFile(cookiesPath, "utf-8");
     const cookies = JSON.parse(cookiesData);
 
-    // Priority-based cookie validation
-    const primaryCookie = cookies.find(
+    // Авторизованную сессию подтверждает ТОЛЬКО непросроченный `sessionid`.
+    // csrftoken/mid/datr и т.п. ставятся и разлогиненным пользователям, поэтому
+    // они НЕ являются признаком входа (раньше fallback на csrftoken давал ложный
+    // "logged in with cookies" с мусорными cookies после reCAPTCHA-страницы).
+    const sessionCookie = cookies.find(
       (cookie: { name: string }) => cookie.name === "sessionid"
-    );
-    const fallbackCookie = cookies.find(
-      (cookie: { name: string }) => cookie.name === "csrftoken"
     );
 
     const currentTimestamp = Math.floor(Date.now() / 1000);
 
-    // Validate primary cookie (sessionid)
-    if (primaryCookie && primaryCookie.expires > currentTimestamp) {
-      return true;
-    }
-
-    // Fallback to csrftoken if sessionid is missing or expired
-    if (fallbackCookie && fallbackCookie.expires > currentTimestamp) {
+    // expires может отсутствовать у session-cookie (-1) — считаем валидной, если
+    // есть значение и она не просрочена.
+    if (
+      sessionCookie &&
+      sessionCookie.value &&
+      (!sessionCookie.expires || sessionCookie.expires > currentTimestamp)
+    ) {
       return true;
     }
 

@@ -78,12 +78,16 @@ export class IgClient {
         await this.page.goto("https://www.instagram.com/", {
             waitUntil: "networkidle2",
         });
-        const url = this.page.url();
-        if (url.includes("/login/")) {
-            logger.warn("Cookies are invalid or expired. Falling back to credentials login.");
+        // Признак реального входа — наличие cookie `sessionid`, а не просто то,
+        // что нас не редиректнуло на /login/ (разлогиненная лента тоже живёт на "/").
+        const activeCookies = await this.page.cookies();
+        const hasSession = activeCookies.some((c) => c.name === "sessionid" && c.value);
+        if (!hasSession || this.page.url().includes("/login/")) {
+            logger.warn("Cookies are invalid or expired (no active session). Falling back to credentials login.");
             await this.loginWithCredentials();
         } else {
             logger.info("Successfully logged in with cookies.");
+            await this.handleNotificationPopup();
         }
     }
 
@@ -93,15 +97,73 @@ export class IgClient {
         await this.page.goto("https://www.instagram.com/accounts/login/", {
             waitUntil: "networkidle2",
         });
-        await this.page.waitForSelector('input[name="username"]');
-        await this.page.type('input[name="username"]', this.username);
-        await this.page.type('input[name="password"]', this.password);
-        await this.page.click('button[type="submit"]');
-        await this.page.waitForNavigation({ waitUntil: "networkidle2" });
+        // Instagram убрал name-атрибуты с полей логина (name="username"/"password"
+        // больше не существуют) — берём поля по type. Кнопка "Log in" тоже больше
+        // не <button type="submit">, поэтому сабмитим форму нажатием Enter.
+        const usernameSelector = 'input[type="text"]';
+        const passwordSelector = 'input[type="password"]';
+        await this.page.waitForSelector(usernameSelector);
+        await this.page.type(usernameSelector, this.username, { delay: 50 });
+        await this.page.type(passwordSelector, this.password, { delay: 50 });
+        await this.page.keyboard.press("Enter");
+        // Навигация != успех: Instagram может отправить на reCAPTCHA, checkpoint
+        // или 2FA. Не считаем вход успешным, пока не появится cookie `sessionid`.
+        await this.page.waitForNavigation({ waitUntil: "networkidle2" }).catch(() => { });
+        const ok = await this.waitForValidSession();
+        if (!ok) {
+            const url = this.page.url();
+            throw new Error(
+                `Login did not produce a valid session (stuck on: ${url}). ` +
+                `Likely a reCAPTCHA / checkpoint / 2FA challenge that was not completed in time.`
+            );
+        }
         const cookies = await this.page.cookies();
         await saveCookies("./cookies/Instagramcookies.json", cookies);
         logger.info("Successfully logged in and saved cookies.");
         await this.handleNotificationPopup();
+    }
+
+    /**
+     * Ждёт появления валидной сессии (cookie `sessionid`). Если Instagram показал
+     * reCAPTCHA / checkpoint / 2FA — даёт время пройти проверку вручную в видимом
+     * окне браузера. Возвращает true, как только sessionid появился, иначе false
+     * по истечении таймаута.
+     */
+    private async waitForValidSession(timeoutMs: number = 300000): Promise<boolean> {
+        if (!this.page) throw new Error("Page not initialized");
+        const start = Date.now();
+        let warnedChallenge = false;
+        while (Date.now() - start < timeoutMs) {
+            // Окно видимое — человек может закрыть его во время прохождения проверки.
+            // Не падаем с protocol-error, а аккуратно выходим.
+            if (this.page.isClosed()) {
+                logger.warn("Browser window was closed before a valid session appeared.");
+                return false;
+            }
+            let cookies;
+            try {
+                cookies = await this.page.cookies();
+            } catch (e) {
+                logger.warn(`Could not read cookies (window likely closed): ${(e as Error).message}`);
+                return false;
+            }
+            if (cookies.some((c) => c.name === "sessionid" && c.value)) {
+                return true;
+            }
+            const url = this.page.url();
+            const isChallenge = /\/(challenge|auth_platform|recaptcha|two_factor)/i.test(url)
+                || url.includes("/accounts/login");
+            if (isChallenge && !warnedChallenge) {
+                warnedChallenge = true;
+                logger.warn(
+                    `Instagram security challenge detected (${url}). ` +
+                    `Complete it manually in the open browser window — ` +
+                    `waiting up to ${Math.round(timeoutMs / 1000)}s for a valid session...`
+                );
+            }
+            await delay(2000);
+        }
+        return false;
     }
 
     async handleNotificationPopup() {
