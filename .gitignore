@@ -127,3 +127,10 @@ public/build
 # Plop js template files
 .plop-templates
 logged_in.png
+
+# Local dev / debugging artifacts
+.playwright-mcp/
+diag-*.png
+diag-*.js
+frontend-chat.png
+frontend-loggedin.png
