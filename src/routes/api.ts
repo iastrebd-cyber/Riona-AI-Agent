@@ -3,22 +3,11 @@ import { getIgClient, closeIgClient, scrapeFollowersHandler } from '../client/In
 import logger from '../config/logger';
 import mongoose from 'mongoose';
 import { signToken, verifyToken, getTokenFromRequest } from '../secret';
+import { requireAuth } from '../middleware/auth';
 import fs from 'fs/promises';
 import path from 'path';
 
 const router = express.Router();
-
-// JWT Auth middleware
-function requireAuth(req: Request, res: Response, next: Function) {
-  const token = getTokenFromRequest(req);
-  if (!token) return res.status(401).json({ error: 'Not authenticated' });
-  const payload = verifyToken(token);
-  if (!payload || typeof payload !== 'object' || !('username' in payload)) {
-    return res.status(401).json({ error: 'Invalid token' });
-  }
-  (req as any).user = { username: payload.username };
-  next();
-}
 
 // Status endpoint
 router.get('/status', (_req: Request, res: Response) => {

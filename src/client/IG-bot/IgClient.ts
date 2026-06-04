@@ -4,14 +4,14 @@ import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import AdblockerPlugin from "puppeteer-extra-plugin-adblocker";
 import UserAgent from "user-agents";
 import { Server } from "proxy-chain";
-import { IGpassword, IGusername } from "../../secret";
+import { IGpassword, IGusername, hasRealGeminiKey } from "../../secret";
 import logger from "../../config/logger";
 import { Instagram_cookiesExist, loadCookies, saveCookies } from "../../utils";
 import { runAgent } from "../../Agent";
 import { getInstagramCommentSchema } from "../../Agent/schema";
 import readline from "readline";
 import fs from "fs/promises";
-import { getShouldExitInteractions } from '../../api/agent';
+import { getShouldExitInteractions } from '../../Agent/AgentController';
 
 // Add stealth plugin to puppeteer
 puppeteerExtra.use(StealthPlugin());
@@ -322,6 +322,115 @@ export class IgClient {
         }
     }
 
+    /**
+     * Публикует одиночное фото через веб-интерфейс «Create» на текущей (уже
+     * залогиненной) сессии — без второго логина. Селекторы best-effort и завязаны
+     * на текущую вёрстку Instagram; при изменениях правятся так же, как логин/скрейпер.
+     */
+    async createPost(imagePath: string, caption: string = "") {
+        if (!this.page) throw new Error("Page not initialized");
+        const page = this.page;
+        try {
+            await page.goto("https://www.instagram.com/", { waitUntil: "networkidle2" });
+            await this.handleNotificationPopup();
+
+            // 1) Открыть создание поста (иконка "New post" в навигации).
+            const newPostIcon = await page.$('svg[aria-label="New post"]');
+            if (!newPostIcon) throw new Error('"New post" button not found.');
+            await newPostIcon.evaluate((node) => {
+                const clickable = node.closest('a, div[role="button"], button') as HTMLElement | null;
+                (clickable || (node as unknown as HTMLElement)).click();
+            });
+            await delay(1500);
+            // Открывшееся подменю: выбрать пункт "Post". Его текст удвоен
+            // ("PostPost"), поэтому матчим по svg-иконке, а не по тексту.
+            const postItem = await page.$('svg[aria-label="Post"]');
+            if (postItem) {
+                await postItem.evaluate((node) => {
+                    const clickable = node.closest('a, div[role="button"], button') as HTMLElement | null;
+                    (clickable || (node as unknown as HTMLElement)).click();
+                });
+                await delay(1500);
+            }
+
+            // 2) Загрузить файл: "Select from computer" открывает file chooser.
+            const [fileChooser] = await Promise.all([
+                page.waitForFileChooser({ timeout: 10000 }).catch(() => null),
+                this.clickByText(["Select from computer", "Select From Computer"], 1500),
+            ]);
+            if (fileChooser) {
+                await fileChooser.accept([imagePath]);
+            } else {
+                const input = await page.$('input[type="file"]');
+                if (!input) throw new Error("File input / chooser not found.");
+                await (input as puppeteer.ElementHandle<HTMLInputElement>).uploadFile(imagePath);
+            }
+            await delay(2500);
+
+            // 3) Crop -> Next, затем Filters/Edit -> Next (две кнопки "Next").
+            for (let i = 0; i < 2; i++) {
+                const ok = await this.clickByText(["Next"], 1500);
+                if (!ok) break;
+            }
+
+            // 4) Подпись (если задана).
+            if (caption) {
+                const captionSelectors = [
+                    'textarea[aria-label="Write a caption..."]',
+                    'div[aria-label="Write a caption..."]',
+                    'div[contenteditable="true"]',
+                    "textarea",
+                ];
+                let typed = false;
+                for (const sel of captionSelectors) {
+                    const box = await page.$(sel);
+                    if (box) {
+                        await box.click();
+                        await box.type(caption);
+                        typed = true;
+                        break;
+                    }
+                }
+                if (!typed) logger.warn("Caption box not found; sharing without caption.");
+                await delay(1000);
+            }
+
+            // 5) Поделиться.
+            const shared = await this.clickByText(["Share"], 1500);
+            if (!shared) throw new Error('"Share" button not found.');
+
+            // 6) Дождаться подтверждения публикации.
+            await page
+                .waitForFunction(
+                    () => /has been shared|post shared/i.test(document.body.innerText),
+                    { timeout: 30000 }
+                )
+                .catch(() => logger.warn("No share-confirmation text seen (post may still have succeeded)."));
+
+            logger.info(`createPost: published ${imagePath}`);
+        } catch (error) {
+            logger.error(`Failed to create post from ${imagePath}: ${(error as Error).message}`);
+            throw error;
+        }
+    }
+
+    /** Кликает первый button/div[role=button]/a, чей текст совпадает с одним из заданных. */
+    private async clickByText(texts: string[], waitMs: number = 0): Promise<boolean> {
+        if (!this.page) throw new Error("Page not initialized");
+        if (waitMs) await delay(waitMs);
+        const wanted = texts.map((t) => t.trim().toLowerCase());
+        const handle = await this.page.evaluateHandle((wanted: string[]) => {
+            const els = Array.from(document.querySelectorAll('button, div[role="button"], a'));
+            return (
+                els.find((el) => wanted.includes((el.textContent || "").trim().toLowerCase())) || null
+            );
+        }, wanted);
+        const el = handle.asElement();
+        if (!el) return false;
+        await (el as puppeteer.ElementHandle<Element>).click();
+        return true;
+    }
+
     async interactWithPosts() {
         if (!this.page) throw new Error("Page not initialized");
         let postIndex = 1; // Start with the first post
@@ -378,7 +487,12 @@ export class IgClient {
                     );
                     caption = expandedCaption;
                 }
-                // Comment on the post
+                // Comment on the post — только при наличии реального ключа Gemini.
+                // Без ключа работаем в режиме «только лайки»: не шлём заведомо
+                // провальные запросы и не печатаем пустой комментарий.
+                if (!hasRealGeminiKey()) {
+                  console.log(`No Gemini key configured — skipping comment on post ${postIndex} (like-only mode).`);
+                } else {
                 const commentBoxSelector = `${postSelector} textarea`;
                 const commentBox = await page.$(commentBoxSelector);
                 if (commentBox) {
@@ -412,6 +526,7 @@ export class IgClient {
                 } else {
                     console.log("Comment box not found.");
                 }
+                } // конец блока комментирования (hasRealGeminiKey)
                 // Wait before moving to the next post
                 const waitTime = Math.floor(Math.random() * 5000) + 5000;
                 console.log(

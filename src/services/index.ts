@@ -1,10 +1,15 @@
 import logger from "../config/logger";
+import { stopAll } from "../Agent/AgentController";
+import { closeIgClient } from "../client/Instagram";
 
 
 // Graceful shutdown function
 export const shutdown = (server: any) => {
     try {
       logger.info("Shutting down gracefully...");
+      // Останавливаем автономные режимы и закрываем браузер.
+      stopAll();
+      closeIgClient().catch((e) => logger.warn(`closeIgClient on shutdown: ${e?.message}`));
       // Attempt to close the server
       server.close(() => {
         logger.info("Closed all connections gracefully.");

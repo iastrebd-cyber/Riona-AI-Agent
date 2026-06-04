@@ -6,9 +6,9 @@ import cors from "cors";
 import session from 'express-session';
 
 import logger, { setupErrorHandlers } from "./config/logger";
-import { setup_HandleError } from "./utils";
 import { connectDB } from "./config/db";
 import apiRoutes from "./routes/api";
+import agentRoutes from "./routes/agent";
 // import { main as twitterMain } from './client/Twitter'; //
 // import { main as githubMain } from './client/GitHub'; //
 
@@ -57,7 +57,9 @@ app.use(session({
 // Serve static files from the 'public' directory
 app.use(express.static('frontend/dist'));
 
-// API Routes
+// API Routes — agent-роутер монтируем ПЕРЕД '/api', иначе '/api/agent/*' будет
+// перехвачен apiRoutes (его requireAuth) и до agentRoutes не дойдёт.
+app.use('/api/agent', agentRoutes);
 app.use('/api', apiRoutes);
 
 // Standalone single-file chat client (served from the project root, same origin
@@ -70,30 +72,9 @@ app.get('*', (_req, res) => {
     res.sendFile('index.html', { root: 'frontend/dist' });
 });
 
-/*
-const runAgents = async () => {
-  while (true) {
-    logger.info("Starting Instagram agent iteration...");
-    await runInstagram();
-    logger.info("Instagram agent iteration finished.");
-
-    // logger.info("Starting Twitter agent...");
-    // await twitterMain();
-    // logger.info("Twitter agent finished.");
-
-    // logger.info("Starting GitHub agent...");
-    // await githubMain();
-    // logger.info("GitHub agent finished.");
-
-    // Wait for 30 seconds before next iteration
-    await new Promise((resolve) => setTimeout(resolve, 30000));
-  }
-};
-
-runAgents().catch((error) => {
-  setup_HandleError(error, "Error running agents:");
-});
-*/
+// Автономные режимы (цикл взаимодействия и постинг по расписанию) больше не
+// крутятся бесконечным циклом при старте — они управляются по требованию через
+// agent-роутер (/api/agent/*), см. src/agent/AgentController.ts.
 
 // Error handling
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

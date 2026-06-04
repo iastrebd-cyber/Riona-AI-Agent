@@ -137,3 +137,6 @@ frontend-loggedin.png
 
 # Scraped follower lists (personal data — keep out of the repo)
 *_followers.txt
+
+# Local post queue + images for scheduled posting
+posts/

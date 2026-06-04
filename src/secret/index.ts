@@ -69,6 +69,13 @@ export const geminiApiKeys = [
   process.env.GEMINI_API_KEY_50 || "API_KEY_50",
 ];
 
+// Настоящий ключ задан, если хотя бы один элемент массива не является
+// плейсхолдером вида "API_KEY_<n>" (дефолт из secret, когда env не задан).
+// Используется, чтобы автономный цикл не слал заведомо провальные запросы к
+// Gemini и просто лайкал, пока ключ не добавлен.
+export const hasRealGeminiKey = (): boolean =>
+  geminiApiKeys.some((k) => !!k && !/^API_KEY_\d+$/.test(k));
+
 const JWT_SECRET = process.env.JWT_SECRET || 'supersecretkey';
 const JWT_EXPIRES_IN = '2h';
 
