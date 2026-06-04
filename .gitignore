@@ -134,3 +134,6 @@ diag-*.png
 diag-*.js
 frontend-chat.png
 frontend-loggedin.png
+
+# Scraped follower lists (personal data — keep out of the repo)
+*_followers.txt
