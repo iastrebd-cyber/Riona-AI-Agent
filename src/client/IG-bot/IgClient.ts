@@ -436,75 +436,86 @@ export class IgClient {
         if (!this.page) throw new Error("Page not initialized");
         const page = this.page;
         try {
-            // Navigate to the target account's followers page
-            await page.goto(`https://www.instagram.com/${targetAccount}/followers/`, {
+            // Instagram больше НЕ открывает список подписчиков по прямому URL
+            // /<acc>/followers/ — счётчик "<N> followers" теперь <a href="#">,
+            // раскрывающий модалку через JS. Идём на профиль и кликаем счётчик.
+            await page.goto(`https://www.instagram.com/${targetAccount}/`, {
                 waitUntil: "networkidle2",
             });
-            console.log(`Navigated to ${targetAccount}'s followers page`);
+            await this.handleNotificationPopup();
+            console.log(`Navigated to ${targetAccount}'s profile`);
 
-            // Wait for the followers modal to load (try robustly)
-            try {
-                await page.waitForSelector('div a[role="link"] span[title]');
-            } catch {
-                // fallback: wait for dialog
-                await page.waitForSelector('div[role="dialog"]');
-            }
-            console.log("Followers modal loaded");
+            // Кликаем по элементу со текстом "<N> followers".
+            const clicked = await page.evaluate(() => {
+                const el = Array.from(
+                    document.querySelectorAll('a, div[role="button"], button')
+                ).find((e) => {
+                    const t = (e.textContent || "").trim().toLowerCase();
+                    return t.length < 25 && /followers$/.test(t);
+                });
+                if (el) {
+                    (el as HTMLElement).click();
+                    return true;
+                }
+                return false;
+            });
+            if (!clicked) throw new Error("Followers button not found on profile.");
 
-            const followers: string[] = [];
-            let previousHeight = 0;
-            let currentHeight = 0;
-            maxFollowers = maxFollowers + 4;
-            // Scroll and collect followers until we reach the desired amount or can't scroll anymore
-            console.log(maxFollowers);
-            while (followers.length < maxFollowers) {
-                // Get all follower links in the current view
-                const newFollowers = await page.evaluate(() => {
-                    const followerElements =
-                        document.querySelectorAll('div a[role="link"]');
-                    return Array.from(followerElements)
-                        .map((element) => element.getAttribute("href"))
-                        .filter(
-                            (href): href is string => href !== null && href.startsWith("/")
-                        )
-                        .map((href) => href.substring(1)); // Remove leading slash
+            // Ждём появления модалки со списком.
+            await page.waitForSelector('div[role="dialog"]', { timeout: 15000 });
+            await delay(1500);
+            console.log("Followers modal opened");
+
+            // Ссылки подписчиков — чистые /<username>/. Отбрасываем служебные пути
+            // (посты, разделы, футер) по списку зарезервированных сегментов.
+            const collectBatch = () =>
+                page.evaluate(() => {
+                    const RESERVED = [
+                        "p", "reel", "reels", "explore", "accounts", "legal",
+                        "popular", "web", "direct", "stories", "archive", "about",
+                        "developer", "tagged", "saved", "followers", "following",
+                    ];
+                    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+                    const dialog = dialogs[dialogs.length - 1];
+                    if (!dialog) return [] as string[];
+                    return Array.from(dialog.querySelectorAll('a[role="link"][href^="/"]'))
+                        .map((a) => a.getAttribute("href") || "")
+                        .map((href) => {
+                            const m = href.match(/^\/([^/]+)\/$/);
+                            return m ? m[1] : "";
+                        })
+                        .filter((u) => u && !RESERVED.includes(u));
                 });
 
-                // Add new unique followers to our list
-                for (const follower of newFollowers) {
-                    if (!followers.includes(follower) && followers.length < maxFollowers) {
-                        followers.push(follower);
-                        console.log(`Found follower: ${follower}`);
-                    }
-                }
+            const followers = new Set<string>();
+            let stagnantRounds = 0;
+            // Останавливаемся при достижении лимита или после 3 раундов без нового.
+            while (followers.size < maxFollowers && stagnantRounds < 3) {
+                const before = followers.size;
 
-                // Scroll the followers modal
+                for (const u of await collectBatch()) {
+                    if (followers.size < maxFollowers) followers.add(u);
+                }
+                console.log(`Collected ${followers.size}/${maxFollowers} followers...`);
+
+                // Скроллим ВНУТРЕННИЙ контейнер модалки (сам диалог не скроллится).
                 await page.evaluate(() => {
-                    const dialog = document.querySelector('div[role="dialog"]');
-                    if (dialog) {
-                        dialog.scrollTop = dialog.scrollHeight;
-                    }
+                    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+                    const dialog = dialogs[dialogs.length - 1];
+                    if (!dialog) return;
+                    const scrollable = Array.from(dialog.querySelectorAll("div")).find(
+                        (d) => d.scrollHeight > d.clientHeight + 20
+                    );
+                    if (scrollable) scrollable.scrollTop = scrollable.scrollHeight;
                 });
+                await delay(1500);
 
-                // Wait for potential new content to load
-                await delay(1000);
-
-                // Check if we've reached the bottom
-                currentHeight = await page.evaluate(() => {
-                    const dialog = document.querySelector('div[role="dialog"]');
-                    return dialog ? dialog.scrollHeight : 0;
-                });
-
-                if (currentHeight === previousHeight) {
-                    console.log("Reached the end of followers list");
-                    break;
-                }
-
-                previousHeight = currentHeight;
+                stagnantRounds = followers.size === before ? stagnantRounds + 1 : 0;
             }
 
-            console.log(`Successfully scraped ${followers.length - 4} followers`);
-            return followers.slice(4, maxFollowers);
+            const result = Array.from(followers).slice(0, maxFollowers);
+            console.log(`Successfully scraped ${result.length} followers`);
+            return result;
         } catch (error) {
             console.error(`Error scraping followers for ${targetAccount}:`, error);
             throw error;
