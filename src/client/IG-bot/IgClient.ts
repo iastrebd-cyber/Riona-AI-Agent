@@ -74,7 +74,13 @@ export class IgClient {
         if (!this.page) throw new Error("Page not initialized");
         const cookies = await loadCookies("./cookies/Instagramcookies.json");
         if (cookies.length > 0) {
-            await this.page.setCookie(...cookies);
+            // browser.setCookie honors partitionKey (page.setCookie drops it),
+            // which sessionid needs to actually restore the session.
+            if (this.browser) {
+                await this.browser.setCookie(...cookies);
+            } else {
+                await this.page.setCookie(...cookies);
+            }
         } else {
             logger.warn("No valid cookies found. Falling back to credentials login.");
             await this.loginWithCredentials();
@@ -141,12 +147,21 @@ export class IgClient {
         }
     }
 
-    // page.cookies() only returns cookies for the current URL and can miss the
-    // httpOnly `sessionid`. Use CDP getAllCookies so the saved jar can actually
-    // restore the session on the next start (and avoid a fresh credential login).
+    // Instagram's `sessionid` is a CHIPS-partitioned cookie: page.cookies()
+    // and CDP Network.getAllCookies never return it, so a jar saved through
+    // them can't restore the session. browser.cookies() (Puppeteer >=22) is
+    // the only API that includes partitioned cookies (with partitionKey).
     private async getAllInstagramCookies(): Promise<any[]> {
         if (!this.page) return [];
         try {
+            if (this.browser) {
+                const all = await this.browser.cookies();
+                const ig = all.filter(
+                    (c: any) => typeof c.domain === "string" && c.domain.includes("instagram.com")
+                );
+                if (ig.some((c: any) => c.name === "sessionid")) return ig;
+                logger.warn("browser.cookies() returned no sessionid; trying CDP fallback.");
+            }
             const cdp = await this.page.target().createCDPSession();
             const { cookies } = await cdp.send("Network.getAllCookies");
             const mapped = (cookies || [])
@@ -161,9 +176,9 @@ export class IgClient {
                     secure: c.secure,
                     sameSite: ["Strict", "Lax", "None"].includes(c.sameSite) ? c.sameSite : undefined,
                 }));
-            if (mapped.some((c: any) => c.name === "sessionid")) return mapped;
+            if (mapped.length > 0) return mapped;
         } catch (e) {
-            logger.warn("CDP getAllCookies failed, falling back to page.cookies().");
+            logger.warn("Cookie collection failed, falling back to page.cookies().");
         }
         return this.page.cookies();
     }
@@ -322,10 +337,23 @@ export class IgClient {
         }
 
         try {
-            await this.page.waitForSelector("article", { timeout: timeoutMs });
+            // The redesigned feed does not always render posts as <article>;
+            // accept role=article containers and post/reel permalinks too.
+            await this.page.waitForSelector(
+                'article, div[role="article"], a[href*="/p/"], a[href*="/reel/"]',
+                { timeout: timeoutMs }
+            );
             return true;
         } catch {
-            logger.warn("Instagram home feed did not load in time.");
+            const url = this.page.url();
+            let title = "";
+            try { title = await this.page.title(); } catch { /* ignore */ }
+            try {
+                await this.page.screenshot({ path: "./cookies/feed-debug.png" });
+            } catch { /* ignore */ }
+            logger.warn(
+                `Instagram home feed did not load in time. URL: ${url}, title: "${title}" — screenshot saved to cookies/feed-debug.png`
+            );
             return false;
         }
     }
@@ -560,6 +588,7 @@ export class IgClient {
         };
         let postIndex = 1; // Start with the first post
         const maxPosts = profile.maxPostsPerRun; // Limit to prevent infinite scrolling
+        let commentsLeft = profile.maxCommentsPerRun;
         const page = this.page;
         while (postIndex <= maxPosts) {
             // Check for exit flag
@@ -643,52 +672,74 @@ export class IgClient {
                     );
                     caption = expandedCaption;
                 }
-                // Comment on the post
-                const commentBoxSelector = `${postSelector} textarea[aria-label*="comment"], ${postSelector} textarea[placeholder*="comment"], ${postSelector} textarea`;
-                const commentBox = await page.$(commentBoxSelector);
-                if (commentBox) {
+                // Comment on the post (capped per run by profile.maxCommentsPerRun)
+                if (commentsLeft > 0) {
                     console.log(`Commenting on post ${postIndex}...`);
                     const prompt = `human-like Instagram comment based on to the following post: "${caption}". make sure the reply\n            Matchs the tone of the caption (casual, funny, serious, or sarcastic).\n            Sound organic—avoid robotic phrasing, overly perfect grammar, or anything that feels AI-generated.\n            Use relatable language, including light slang, emojis (if appropriate), and subtle imperfections like minor typos or abbreviations (e.g., 'lol' or 'omg').\n            If the caption is humorous or sarcastic, play along without overexplaining the joke.\n            If the post is serious (e.g., personal struggles, activism), respond with empathy and depth.\n            Avoid generic praise ('Great post!'); instead, react specifically to the content (e.g., 'The way you called out pineapple pizza haters 😂👏').\n            *Keep it concise (1-2 sentences max) and compliant with Instagram's guidelines (no spam, harassment, etc.).*`;
                     const schema = getInstagramCommentSchema();
                     const result = await runAgent(schema, prompt);
-                    const comment = (result[0]?.comment ?? "") as string;
+                    const comment = (Array.isArray(result) ? result[0]?.comment ?? "" : "") as string;
                     const filterCfg = getCommentFilterConfig();
-                    if (shouldSkipComment(comment, filterCfg)) {
+                    if (!comment) {
+                        console.log(`No comment generated for post ${postIndex} (AI unavailable?). Skipping comment.`);
+                    } else if (shouldSkipComment(comment, filterCfg)) {
                         console.log(`Comment blocked by filters for post ${postIndex}.`);
                     } else {
-                    await commentBox.click();
-                    await commentBox.type(comment);
-                    // New selector approach for the post button
-                    const postButton = await page.evaluateHandle((sel) => {
-                        const article = document.querySelector(sel);
-                        if (!article) return null;
-                        const buttons = Array.from(
-                            article.querySelectorAll('div[role="button"], button')
-                        );
-                        return buttons.find(
-                            (button) =>
-                                (button.textContent || "").trim() === "Post" &&
-                                !button.hasAttribute("disabled")
-                        ) || null;
-                    }, postSelector);
-                    // Only click if postButton is an ElementHandle and not null
-                    const postButtonElement = postButton && postButton.asElement ? postButton.asElement() : null;
-                    if (postButtonElement) {
-                        console.log(`Posting comment on post ${postIndex}...`);
-                        await (postButtonElement as puppeteer.ElementHandle<Element>).click();
-                        console.log(`Comment posted on post ${postIndex}.`);
-                        if (dailyLimit > 0) {
-                            await incrementIgDailyCount(1);
+                        // Inline composer first (legacy feed markup)...
+                        const commentBoxSelector = `${postSelector} textarea[aria-label*="comment"], ${postSelector} textarea[placeholder*="comment"], ${postSelector} textarea`;
+                        let box = await page.$(commentBoxSelector);
+                        let usedModal = false;
+                        if (!box) {
+                            // ...otherwise click the article's Comment icon — the
+                            // redesign opens the post dialog which holds the composer.
+                            const clicked = await page.evaluate((sel) => {
+                                const article = document.querySelector(sel);
+                                const svg = article && article.querySelector('svg[aria-label="Comment"]');
+                                const btn = svg && (svg.closest('div[role="button"], button, a') as HTMLElement | null);
+                                if (btn) { btn.click(); return true; }
+                                return false;
+                            }, postSelector);
+                            if (clicked) {
+                                usedModal = true;
+                                await delay(2000);
+                                box = await page.$('div[role="dialog"] textarea, div[role="dialog"] div[contenteditable="true"], textarea[aria-label*="omment"], div[contenteditable="true"][role="textbox"]');
+                            }
                         }
-                        summary.comments++;
-                        // Wait for comment to be posted and UI to update
-                        await delay(2000);
-                    } else {
-                        console.log("Post button not found.");
+                        if (box) {
+                            await box.click();
+                            await delay(400);
+                            await page.keyboard.type(comment, { delay: 30 });
+                            await delay(800);
+                            const posted = await page.evaluate(() => {
+                                const scope = document.querySelector('div[role="dialog"]') || document;
+                                const labels = ['post', 'opublikuj', 'publish'];
+                                const btns = Array.from(scope.querySelectorAll('div[role="button"], button, [type="submit"]'));
+                                const target = btns.find((b) => {
+                                    const t = (b.textContent || '').trim().toLowerCase();
+                                    return labels.includes(t) && !b.hasAttribute('disabled') && (b as HTMLElement).getAttribute('aria-disabled') !== 'true';
+                                }) as HTMLElement | undefined;
+                                if (target) { target.click(); return true; }
+                                return false;
+                            });
+                            if (!posted) {
+                                await page.keyboard.press('Enter');
+                            }
+                            console.log(`Comment posted on post ${postIndex}: "${comment}"`);
+                            if (dailyLimit > 0) {
+                                await incrementIgDailyCount(1);
+                            }
+                            summary.comments++;
+                            commentsLeft--;
+                            await delay(2500);
+                        } else {
+                            console.log("Comment box not found.");
+                        }
+                        if (usedModal) {
+                            // Close the post dialog and let the feed settle.
+                            await page.keyboard.press('Escape');
+                            await delay(1500);
+                        }
                     }
-                    }
-                } else {
-                    console.log("Comment box not found.");
                 }
                 summary.postsVisited++;
                 if (dailyLimit > 0) {
@@ -735,7 +786,8 @@ export class IgClient {
     async interactWithUserPosts(
         targetUsername: string,
         maxLikes: number = 5,
-        maxComments: number = 1
+        maxComments: number = 1,
+        maxCommentWords?: number
     ) {
         if (!this.page) throw new Error("Page not initialized");
         if (await this.isOnLoginOrChallenge()) {
@@ -831,7 +883,10 @@ export class IgClient {
                         const meta = document.querySelector('meta[property="og:description"]');
                         return meta ? (meta.getAttribute('content') || '') : '';
                     });
-                    const prompt = `human-like Instagram comment based on the following post: "${caption}". Keep it concise (1 short sentence), warm and specific, sound organic (light slang/emoji ok), avoid generic praise.`;
+                    const lengthRule = maxCommentWords && maxCommentWords > 0
+                        ? `STRICT LIMIT: ${maxCommentWords} words maximum`
+                        : `Keep it concise (1 short sentence)`;
+                    const prompt = `human-like Instagram comment based on the following post: "${caption}". ${lengthRule}, warm and specific, sound organic (light slang/emoji ok), avoid generic praise.`;
                     const schema = getInstagramCommentSchema();
                     // The AI free tier occasionally returns empty; retry once.
                     let comment = "";
@@ -885,7 +940,18 @@ export class IgClient {
                                 await delay(2500);
                             }
                         } else {
-                            logger.warn(`Comment box not found on ${link}.`);
+                            // Capture what the post page actually renders so the
+                            // missing-composer issue is diagnosable from the logs.
+                            const diag = await page.evaluate(() => ({
+                                url: location.href,
+                                textareas: document.querySelectorAll('textarea').length,
+                                editables: document.querySelectorAll('div[contenteditable="true"]').length,
+                                forms: document.querySelectorAll('form').length,
+                                commentsOff: !!Array.from(document.querySelectorAll('span, div'))
+                                    .find((el) => /comments (on this post )?have been limited|commenting .* (off|disabled)/i.test(el.textContent || '')),
+                            }));
+                            try { await page.screenshot({ path: "./cookies/comment-debug.png" }); } catch { /* ignore */ }
+                            logger.warn(`Comment box not found on ${link}. Diag: ${JSON.stringify(diag)} — screenshot saved to cookies/comment-debug.png`);
                         }
                     }
                 }

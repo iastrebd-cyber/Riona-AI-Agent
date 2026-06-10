@@ -213,15 +213,18 @@ router.post('/interact', async (req: Request, res: Response) => {
 // Interact with a specific profile's posts (separate like/comment caps)
 router.post('/interact-user', async (req: Request, res: Response) => {
   try {
-    const { targetUsername, maxLikes, maxComments } = req.body;
+    const { targetUsername, maxLikes, maxComments, maxCommentWords } = req.body;
     if (!targetUsername) {
       return res.status(400).json({ error: 'targetUsername is required' });
     }
     const likes = Number.isFinite(Number(maxLikes)) ? Number(maxLikes) : 5;
     const comments = Number.isFinite(Number(maxComments)) ? Number(maxComments) : 1;
+    const commentWords = Number.isFinite(Number(maxCommentWords)) && Number(maxCommentWords) > 0
+      ? Number(maxCommentWords)
+      : undefined;
     const account = (req as any).user.account || 'default';
     const igClient = await getIgClient((req as any).user.username, undefined, account);
-    const summary = await igClient.interactWithUserPosts(String(targetUsername), likes, comments);
+    const summary = await igClient.interactWithUserPosts(String(targetUsername), likes, comments, commentWords);
     await logAction({
       platform: 'instagram',
       action: 'interact-user',

@@ -18,18 +18,18 @@ export async function Instagram_cookiesExist(): Promise<boolean> {
       return false;
     }
 
-    const primaryCookie = cookies.find(
+    // Only sessionid proves an authenticated session; csrftoken/datr/mid also
+    // exist for logged-out visitors, so treating them as valid leads to a
+    // false-positive cookie login and a feed that never loads.
+    const sessionCookie = cookies.find(
       (cookie: { name: string }) => cookie.name === "sessionid"
-    );
-    const fallbackCookie = cookies.find(
-      (cookie: { name: string }) => cookie.name === "csrftoken"
     );
 
     const currentTimestamp = Math.floor(Date.now() / 1000);
 
-    if (primaryCookie && primaryCookie.expires > currentTimestamp) return true;
-    if (fallbackCookie && fallbackCookie.expires > currentTimestamp) return true;
+    if (sessionCookie && sessionCookie.expires > currentTimestamp) return true;
 
+    logger.warn("Saved cookies lack a valid sessionid. Forcing credentials login.");
     return false;
   } catch (error) {
     const err = error as NodeJS.ErrnoException;

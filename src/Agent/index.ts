@@ -48,12 +48,31 @@ export async function runAgent(
 
   const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
+  const primaryModel = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const fallbackModel = process.env.GEMINI_FALLBACK_MODEL || "gemini-2.5-flash-lite";
+
   try {
-    const result = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: generationConfig,
-    });
+    let result;
+    try {
+      result = await ai.models.generateContent({
+        model: primaryModel,
+        contents: prompt,
+        config: generationConfig,
+      });
+    } catch (primaryError: any) {
+      const msg = primaryError instanceof Error ? primaryError.message : String(primaryError);
+      const overloaded = msg.includes("503") || msg.toLowerCase().includes("unavailable") || msg.toLowerCase().includes("high demand");
+      if (overloaded && fallbackModel && fallbackModel !== primaryModel) {
+        logger.warn(`${primaryModel} is overloaded (503). Retrying with ${fallbackModel}...`);
+        result = await ai.models.generateContent({
+          model: fallbackModel,
+          contents: prompt,
+          config: generationConfig,
+        });
+      } else {
+        throw primaryError;
+      }
+    }
 
     if (!result || !result.text) {
       logger.info("No response received from the AI model. || Service Unavailable");
