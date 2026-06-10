@@ -508,6 +508,22 @@ export class IgClient {
             const articleEl = document.querySelector(articleSel);
             if (!articleEl) return { sponsored: false };
 
+            // STRATEGY 0: the post header ("username · Sponsored"). IG splits
+            // the "Sponsored" label across multiple spans to defeat ad blockers,
+            // so per-span checks miss it — compare against the JOINED text.
+            const headerEl = articleEl.querySelector('header') || articleEl;
+            const headerText = (headerEl.textContent || '').toLowerCase();
+            for (const m of markersList) {
+                if (headerText.includes(m)) {
+                    return { sponsored: true, reason: `header:${m}` };
+                }
+            }
+
+            // STRATEGY 0.5: ad-specific links (About this ad / ad transparency).
+            if (articleEl.querySelector('a[href*="/ads/"], a[href*="ads.instagram.com"], [aria-label*="About this ad" i]')) {
+                return { sponsored: true, reason: 'ads-link' };
+            }
+
             // STRATEGY 1: Find elements with ad marker text.
             // Instagram often hides this in a span element containing only this word.
             const allSpans = articleEl.querySelectorAll('span');
@@ -528,6 +544,16 @@ export class IgClient {
                 const matched = buttonMarkersList.find((marker) => text.includes(marker));
                 if (matched) {
                     return { sponsored: true, reason: `button:${matched}` }; // Found an ad button!
+                }
+            }
+
+            // STRATEGY 3 (last resort): whole-article text. Catches markers that
+            // moved out of the header; a caption merely mentioning the word costs
+            // us one skipped organic post, which is the cheap kind of mistake.
+            const fullText = (articleEl.textContent || '').toLowerCase();
+            for (const m of markersList) {
+                if (fullText.includes(m)) {
+                    return { sponsored: true, reason: `article-text:${m}` };
                 }
             }
 
@@ -679,10 +705,16 @@ export class IgClient {
                 // Comment on the post (capped per run by profile.maxCommentsPerRun)
                 if (commentsLeft > 0) {
                     console.log(`Commenting on post ${postIndex}...`);
-                    const prompt = `human-like Instagram comment based on to the following post: "${caption}". make sure the reply\n            Matchs the tone of the caption (casual, funny, serious, or sarcastic).\n            Sound organic—avoid robotic phrasing, overly perfect grammar, or anything that feels AI-generated.\n            Use relatable language, including light slang, emojis (if appropriate), and subtle imperfections like minor typos or abbreviations (e.g., 'lol' or 'omg').\n            If the caption is humorous or sarcastic, play along without overexplaining the joke.\n            If the post is serious (e.g., personal struggles, activism), respond with empathy and depth.\n            Avoid generic praise ('Great post!'); instead, react specifically to the content (e.g., 'The way you called out pineapple pizza haters 😂👏').\n            *Keep it concise (1-2 sentences max) and compliant with Instagram's guidelines (no spam, harassment, etc.).*`;
+                    const wordCap = profile.commentMaxWords;
+                    const prompt = `human-like Instagram comment reacting to this post: "${caption}". STRICT LIMIT: ${wordCap} words maximum (3-${wordCap} words). Casual and specific to the content, light slang/emoji ok, no generic praise, no hashtags.`;
                     const schema = getInstagramCommentSchema();
                     const result = await runAgent(schema, prompt);
-                    const comment = (Array.isArray(result) ? result[0]?.comment ?? "" : "") as string;
+                    let comment = (Array.isArray(result) ? result[0]?.comment ?? "" : "") as string;
+                    // Hard-enforce the cap in case the model ignores it.
+                    const words = comment.trim().split(/\s+/);
+                    if (words.length > wordCap) {
+                        comment = words.slice(0, wordCap).join(' ').replace(/[,;:]$/, '');
+                    }
                     const filterCfg = getCommentFilterConfig();
                     if (!comment) {
                         console.log(`No comment generated for post ${postIndex} (AI unavailable?). Skipping comment.`);
@@ -896,10 +928,9 @@ export class IgClient {
                         const meta = document.querySelector('meta[property="og:description"]');
                         return meta ? (meta.getAttribute('content') || '') : '';
                     });
-                    const lengthRule = maxCommentWords && maxCommentWords > 0
-                        ? `STRICT LIMIT: ${maxCommentWords} words maximum`
-                        : `Keep it concise (1 short sentence)`;
-                    const prompt = `human-like Instagram comment based on the following post: "${caption}". ${lengthRule}, warm and specific, sound organic (light slang/emoji ok), avoid generic praise.`;
+                    // Explicit per-call cap wins; otherwise the profile default applies.
+                    const wordCap = maxCommentWords && maxCommentWords > 0 ? maxCommentWords : profile.commentMaxWords;
+                    const prompt = `human-like Instagram comment based on the following post: "${caption}". STRICT LIMIT: ${wordCap} words maximum, warm and specific, sound organic (light slang/emoji ok), avoid generic praise.`;
                     const schema = getInstagramCommentSchema();
                     // The AI free tier occasionally returns empty; retry once.
                     let comment = "";
@@ -907,6 +938,11 @@ export class IgClient {
                         if (attempt > 0) await delay(3000);
                         const result = await runAgent(schema, prompt);
                         comment = (Array.isArray(result) ? result[0]?.comment : "") as string;
+                    }
+                    // Hard-enforce the cap in case the model ignores it.
+                    const capWords = comment.trim().split(/\s+/);
+                    if (capWords.length > wordCap) {
+                        comment = capWords.slice(0, wordCap).join(' ').replace(/[,;:]$/, '');
                     }
                     const filterCfg = getCommentFilterConfig();
                     if (!comment) {

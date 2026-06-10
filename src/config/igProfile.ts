@@ -6,6 +6,7 @@ type IgProfile = {
   dailyMaxActions: number;
   maxPostsPerRun: number;
   maxCommentsPerRun: number;
+  commentMaxWords: number;
   minDelayMs: number;
   maxDelayMs: number;
 };
@@ -17,6 +18,7 @@ const PROFILES: Record<IgProfile['name'], IgProfile> = {
     dailyMaxActions: 50,
     maxPostsPerRun: 8,
     maxCommentsPerRun: 2,
+    commentMaxWords: 6,
     minDelayMs: 10_000,
     maxDelayMs: 20_000,
   },
@@ -26,6 +28,7 @@ const PROFILES: Record<IgProfile['name'], IgProfile> = {
     dailyMaxActions: 120,
     maxPostsPerRun: 20,
     maxCommentsPerRun: 5,
+    commentMaxWords: 6,
     minDelayMs: 5_000,
     maxDelayMs: 10_000,
   },
@@ -35,6 +38,7 @@ const PROFILES: Record<IgProfile['name'], IgProfile> = {
     dailyMaxActions: 250,
     maxPostsPerRun: 30,
     maxCommentsPerRun: 10,
+    commentMaxWords: 6,
     minDelayMs: 3_000,
     maxDelayMs: 7_000,
   },
@@ -50,6 +54,7 @@ export const getIgProfile = (): IgProfile => {
     dailyMaxActions: getNumberEnv('IG_DAILY_MAX_ACTIONS', base.dailyMaxActions),
     maxPostsPerRun: getNumberEnv('IG_MAX_POSTS_PER_RUN', base.maxPostsPerRun),
     maxCommentsPerRun: getNumberEnv('IG_MAX_COMMENTS_PER_RUN', base.maxCommentsPerRun),
+    commentMaxWords: getNumberEnv('IG_COMMENT_MAX_WORDS', base.commentMaxWords),
     minDelayMs: getNumberEnv('IG_ACTION_DELAY_MIN_MS', base.minDelayMs),
     maxDelayMs: getNumberEnv('IG_ACTION_DELAY_MAX_MS', base.maxDelayMs),
   };
