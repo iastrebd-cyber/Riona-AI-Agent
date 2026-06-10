@@ -631,6 +631,10 @@ export class IgClient {
                 }
                 if (ariaLabel === "Like" && likeIcon) {
                     console.log(`Liking post ${postIndex}...`);
+                    // The icon can sit outside the viewport after scrolling —
+                    // clicking it there throws "Node is either not clickable".
+                    await likeIcon.evaluate((el: Element) => el.scrollIntoView({ block: "center" }));
+                    await delay(500);
                     await likeIcon.click();
                     await page.keyboard.press("Enter");
                     console.log(`Post ${postIndex} liked.`);
@@ -767,7 +771,16 @@ export class IgClient {
             } catch (error) {
                 console.error(`Error interacting with post ${postIndex}:`, error);
                 summary.errors++;
-                break;
+                // One flaky post shouldn't end the whole run, but repeated
+                // failures usually mean the page is broken — stop then.
+                if (summary.errors >= 3) {
+                    console.log("Too many post errors; ending iteration.");
+                    break;
+                }
+                await page.evaluate(() => {
+                    window.scrollBy(0, window.innerHeight);
+                });
+                postIndex++;
             }
         }
         const finishedAt = new Date();
