@@ -92,11 +92,107 @@ export class IgClient {
                 await this.loginWithCredentials();
             } else {
                 logger.info("Successfully logged in with cookies.");
+                // Refresh the saved jar (complete set incl. sessionid) so it
+                // stays valid across restarts.
+                try {
+                    const fresh = await this.getAllInstagramCookies();
+                    await saveCookies("./cookies/Instagramcookies.json", fresh);
+                } catch { /* non-fatal */ }
             }
         } catch (error) {
             logger.warn("Login with cookies failed. Falling back to credentials login.");
             await this.loginWithCredentials();
         }
+    }
+
+    private async dismissCookieConsent(): Promise<void> {
+        if (!this.page) return;
+        // Instagram shows an EU/region cookie-consent wall that covers the login form.
+        // Click the "allow" button (matched across EN + PL) before touching the form.
+        const consentTexts = [
+            "allow all cookies",
+            "allow all",
+            "accept all",
+            "zezwól na wszystkie pliki cookie",
+            "zezwól na wszystkie",
+            "zezwalaj na wszystkie pliki cookie",
+            "akceptuj wszystkie",
+        ];
+        try {
+            const clicked = await this.page.evaluate((texts) => {
+                const candidates = Array.from(
+                    document.querySelectorAll('button, div[role="button"]')
+                );
+                for (const el of candidates) {
+                    const label = (el.textContent || "").trim().toLowerCase();
+                    if (texts.some((t) => label === t || label.includes(t))) {
+                        (el as HTMLElement).click();
+                        return label;
+                    }
+                }
+                return null;
+            }, consentTexts);
+            if (clicked) {
+                logger.info(`Dismissed cookie consent dialog ("${clicked}").`);
+                await delay(2000);
+            }
+        } catch (e) {
+            logger.warn("Cookie consent check failed (continuing).");
+        }
+    }
+
+    // page.cookies() only returns cookies for the current URL and can miss the
+    // httpOnly `sessionid`. Use CDP getAllCookies so the saved jar can actually
+    // restore the session on the next start (and avoid a fresh credential login).
+    private async getAllInstagramCookies(): Promise<any[]> {
+        if (!this.page) return [];
+        try {
+            const cdp = await this.page.target().createCDPSession();
+            const { cookies } = await cdp.send("Network.getAllCookies");
+            const mapped = (cookies || [])
+                .filter((c: any) => typeof c.domain === "string" && c.domain.includes("instagram.com"))
+                .map((c: any) => ({
+                    name: c.name,
+                    value: c.value,
+                    domain: c.domain,
+                    path: c.path,
+                    expires: c.expires && c.expires > 0 ? c.expires : undefined,
+                    httpOnly: c.httpOnly,
+                    secure: c.secure,
+                    sameSite: ["Strict", "Lax", "None"].includes(c.sameSite) ? c.sameSite : undefined,
+                }));
+            if (mapped.some((c: any) => c.name === "sessionid")) return mapped;
+        } catch (e) {
+            logger.warn("CDP getAllCookies failed, falling back to page.cookies().");
+        }
+        return this.page.cookies();
+    }
+
+    // Instagram increasingly gates automated logins behind reCAPTCHA / a
+    // checkpoint challenge. Because the browser is non-headless, the user can
+    // solve it in the visible window — poll until we land back on a normal page.
+    private async waitForManualChallengeResolution(maxWaitMs = 180000): Promise<boolean> {
+        if (!this.page) return false;
+        const isChallenge = () => {
+            const url = this.page!.url();
+            return url.includes("/auth_platform/recaptcha") ||
+                url.includes("/challenge") ||
+                url.includes("/accounts/login") ||
+                url.includes("/two_factor");
+        };
+        if (!isChallenge()) return true;
+        logger.warn("Instagram presented a reCAPTCHA/challenge. Waiting up to 3 min for manual resolution in the open browser window...");
+        const start = Date.now();
+        while (Date.now() - start < maxWaitMs) {
+            await delay(3000);
+            if (!isChallenge()) {
+                logger.info("Challenge resolved — continuing.");
+                await delay(2000);
+                return true;
+            }
+        }
+        logger.error("Challenge was not resolved within the timeout.");
+        return false;
     }
 
     private async loginWithCredentials(retry = false): Promise<void> {
@@ -109,16 +205,35 @@ export class IgClient {
             await this.page.goto("https://www.instagram.com/accounts/login/", {
                 waitUntil: "networkidle2",
             });
-            await this.page.waitForSelector('input[name="username"]');
-            await this.page.type('input[name="username"]', this.username);
-            await this.page.type('input[name="password"]', this.password);
-            await this.page.click('button[type="submit"]');
+            await this.dismissCookieConsent();
+            // Instagram serves multiple login form variants: legacy uses
+            // name="username"/"password"/button[submit], the redesign uses
+            // name="email"/"pass"/input[submit]. Match both.
+            const userSel = 'input[name="username"], input[name="email"]';
+            const passSel = 'input[name="password"], input[name="pass"]';
+            await this.page.waitForSelector(userSel, { timeout: 30000 });
+            await this.page.type(userSel, this.username);
+            await this.page.type(passSel, this.password);
+            // The visible "Log in" button is a div[role=button] in the redesign and
+            // the real input[type=submit] is hidden/unclickable, so submit the form
+            // by pressing Enter from the (focused) password field instead.
+            await this.page.keyboard.press("Enter");
             await this.page.waitForNavigation({ waitUntil: "networkidle2" });
-            const cookies = await this.page.cookies();
+            // If IG threw up a reCAPTCHA/checkpoint, give the user a chance to
+            // solve it in the visible window before we bail.
+            await this.waitForManualChallengeResolution();
+            const cookies = await this.getAllInstagramCookies();
             await saveCookies("./cookies/Instagramcookies.json", cookies);
             logger.info("Successfully logged in and saved cookies.");
             await this.handleNotificationPopup();
         } catch (error) {
+            // Capture what Instagram actually showed so login failures are diagnosable.
+            try {
+                if (this.page) {
+                    await this.page.screenshot({ path: "./cookies/login-debug.png", fullPage: true });
+                    logger.warn(`Login failed on URL: ${this.page.url()} — saved screenshot to cookies/login-debug.png`);
+                }
+            } catch { /* ignore screenshot errors */ }
             if (!retry) {
                 logger.warn("Login with credentials failed. Retrying once...");
                 await delay(5000);
@@ -609,6 +724,186 @@ export class IgClient {
         summary.durationMs = finishedAt.getTime() - startedAt.getTime();
         setLastRunSummary(summary);
         logger.info(`IG run summary: ${JSON.stringify(summary)}`);
+    }
+
+    /**
+     * Visit a specific profile and like up to `maxLikes` of its posts while
+     * leaving at most `maxComments` AI-generated comments. Unlike
+     * interactWithPosts (home feed only), this targets one account's posts and
+     * enforces separate like/comment caps.
+     */
+    async interactWithUserPosts(
+        targetUsername: string,
+        maxLikes: number = 5,
+        maxComments: number = 1
+    ) {
+        if (!this.page) throw new Error("Page not initialized");
+        if (await this.isOnLoginOrChallenge()) {
+            logger.warn("Instagram requires login/challenge resolution. Aborting.");
+            throw new Error("Not authenticated (login/challenge required).");
+        }
+        const page = this.page;
+        const profile = getIgProfile();
+        const startedAt = new Date();
+        const summary = {
+            startedAt: startedAt.toISOString(),
+            finishedAt: '',
+            durationMs: 0,
+            target: targetUsername,
+            postsVisited: 0,
+            likes: 0,
+            comments: 0,
+            skippedSponsored: 0,
+            errors: 0,
+        };
+
+        logger.info(`Visiting profile @${targetUsername} (target: ${maxLikes} likes, ${maxComments} comment(s))`);
+        await page.goto(`https://www.instagram.com/${targetUsername}/`, { waitUntil: "networkidle2" });
+        await this.dismissCookieConsent();
+
+        // Collect post permalinks from the profile grid.
+        try {
+            await page.waitForSelector('a[href*="/p/"], a[href*="/reel/"]', { timeout: 20000 });
+        } catch {
+            logger.warn(`No posts found on @${targetUsername} (private account or empty grid?).`);
+            const finishedAtEarly = new Date();
+            summary.finishedAt = finishedAtEarly.toISOString();
+            summary.durationMs = finishedAtEarly.getTime() - startedAt.getTime();
+            setLastRunSummary(summary);
+            return summary;
+        }
+        const links: string[] = await page.evaluate(() => {
+            const set = new Set<string>();
+            document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]').forEach((a) => {
+                const href = a.getAttribute('href');
+                if (href) set.add(href.split('?')[0]);
+            });
+            return Array.from(set);
+        });
+        const targetCount = Math.max(maxLikes, maxComments);
+        const postLinks = links.slice(0, targetCount);
+        logger.info(`Found ${links.length} posts on @${targetUsername}; will process ${postLinks.length}.`);
+
+        let likesLeft = maxLikes;
+        let commentsLeft = maxComments;
+
+        for (const link of postLinks) {
+            if (likesLeft <= 0 && commentsLeft <= 0) break;
+            try {
+                await page.goto(`https://www.instagram.com${link}`, { waitUntil: "networkidle2" });
+                await delay(1500);
+                summary.postsVisited++;
+
+                // Like: find the action bar (section containing both Like and Comment) and click Like.
+                if (likesLeft > 0) {
+                    const likeResult = await page.evaluate(() => {
+                        const sections = Array.from(document.querySelectorAll('section'));
+                        for (const sec of sections) {
+                            const like = sec.querySelector('svg[aria-label="Like"]');
+                            const hasComment = sec.querySelector('svg[aria-label="Comment"]');
+                            if (like && hasComment) {
+                                const btn = like.closest('div[role="button"], button, a') as HTMLElement | null;
+                                if (btn) { btn.click(); return 'liked'; }
+                            }
+                            if (!like && sec.querySelector('svg[aria-label="Unlike"]') && hasComment) {
+                                return 'already';
+                            }
+                        }
+                        return 'notfound';
+                    });
+                    if (likeResult === 'liked') {
+                        summary.likes++;
+                        likesLeft--;
+                        logger.info(`Liked ${link} (${summary.likes}/${maxLikes}).`);
+                    } else if (likeResult === 'already') {
+                        logger.info(`${link} already liked, skipping like.`);
+                    } else {
+                        logger.warn(`Like button not found on ${link}.`);
+                    }
+                    await delay(1200);
+                }
+
+                // Comment: only while we still have comment budget.
+                if (commentsLeft > 0) {
+                    const caption: string = await page.evaluate(() => {
+                        const h1 = document.querySelector('h1');
+                        if (h1 && (h1 as HTMLElement).innerText) return (h1 as HTMLElement).innerText;
+                        const meta = document.querySelector('meta[property="og:description"]');
+                        return meta ? (meta.getAttribute('content') || '') : '';
+                    });
+                    const prompt = `human-like Instagram comment based on the following post: "${caption}". Keep it concise (1 short sentence), warm and specific, sound organic (light slang/emoji ok), avoid generic praise.`;
+                    const schema = getInstagramCommentSchema();
+                    // The AI free tier occasionally returns empty; retry once.
+                    let comment = "";
+                    for (let attempt = 0; attempt < 2 && !comment; attempt++) {
+                        if (attempt > 0) await delay(3000);
+                        const result = await runAgent(schema, prompt);
+                        comment = (Array.isArray(result) ? result[0]?.comment : "") as string;
+                    }
+                    const filterCfg = getCommentFilterConfig();
+                    if (!comment) {
+                        logger.warn(`No comment generated for ${link} (AI unavailable?). Skipping comment.`);
+                    } else if (shouldSkipComment(comment, filterCfg)) {
+                        logger.info(`Comment blocked by filters for ${link}.`);
+                    } else {
+                        // On the post page the comment composer is not mounted until
+                        // the Comment icon is clicked; do that first to reveal it.
+                        await page.evaluate(() => {
+                            const svg = document.querySelector('svg[aria-label="Comment"]');
+                            const btn = svg && (svg.closest('div[role="button"], button, a') as HTMLElement | null);
+                            if (btn) btn.click();
+                        });
+                        await delay(1500);
+                        // Composer may be a <textarea> or a contenteditable div.
+                        const composerSel = 'textarea[aria-label*="omment"], textarea[placeholder*="omment"], textarea, div[contenteditable="true"][role="textbox"], div[aria-label*="omment"][contenteditable="true"]';
+                        const box = await page.$(composerSel);
+                        if (box) {
+                            await box.click();
+                            await delay(400);
+                            await page.keyboard.type(comment, { delay: 30 });
+                            await delay(800);
+                            const posted = await page.evaluate(() => {
+                                const labels = ['post', 'opublikuj', 'publish'];
+                                const btns = Array.from(document.querySelectorAll('div[role="button"], button, [type="submit"]'));
+                                const target = btns.find((b) => {
+                                    const t = (b.textContent || '').trim().toLowerCase();
+                                    return labels.includes(t) && !b.hasAttribute('disabled') && (b as HTMLElement).getAttribute('aria-disabled') !== 'true';
+                                }) as HTMLElement | undefined;
+                                if (target) { target.click(); return true; }
+                                return false;
+                            });
+                            // Fallback: submit with Enter if no Post button was found.
+                            let confirmed = posted;
+                            if (!confirmed) {
+                                await page.keyboard.press('Enter');
+                                confirmed = true;
+                            }
+                            if (confirmed) {
+                                summary.comments++;
+                                commentsLeft--;
+                                logger.info(`Commented on ${link}: "${comment}"`);
+                                await delay(2500);
+                            }
+                        } else {
+                            logger.warn(`Comment box not found on ${link}.`);
+                        }
+                    }
+                }
+
+                const waitTime = Math.floor(Math.random() * (profile.maxDelayMs - profile.minDelayMs + 1)) + profile.minDelayMs;
+                await delay(waitTime);
+            } catch (error) {
+                logger.error(`Error interacting with ${link}:`, error);
+                summary.errors++;
+            }
+        }
+
+        const finishedAt = new Date();
+        summary.finishedAt = finishedAt.toISOString();
+        summary.durationMs = finishedAt.getTime() - startedAt.getTime();
+        setLastRunSummary(summary);
+        logger.info(`Targeted IG run summary: ${JSON.stringify(summary)}`);
+        return summary;
     }
 
     async scrapeFollowers(targetAccount: string, maxFollowers: number) {

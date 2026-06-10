@@ -210,6 +210,41 @@ router.post('/interact', async (req: Request, res: Response) => {
   }
 });
 
+// Interact with a specific profile's posts (separate like/comment caps)
+router.post('/interact-user', async (req: Request, res: Response) => {
+  try {
+    const { targetUsername, maxLikes, maxComments } = req.body;
+    if (!targetUsername) {
+      return res.status(400).json({ error: 'targetUsername is required' });
+    }
+    const likes = Number.isFinite(Number(maxLikes)) ? Number(maxLikes) : 5;
+    const comments = Number.isFinite(Number(maxComments)) ? Number(maxComments) : 1;
+    const account = (req as any).user.account || 'default';
+    const igClient = await getIgClient((req as any).user.username, undefined, account);
+    const summary = await igClient.interactWithUserPosts(String(targetUsername), likes, comments);
+    await logAction({
+      platform: 'instagram',
+      action: 'interact-user',
+      status: 'success',
+      account,
+      username: (req as any).user.username,
+      details: { targetUsername, maxLikes: likes, maxComments: comments, likes: summary?.likes, comments: summary?.comments },
+    });
+    return res.json({ message: 'Interaction complete', summary });
+  } catch (error) {
+    logger.error('Targeted interaction error:', error);
+    await logAction({
+      platform: 'instagram',
+      action: 'interact-user',
+      status: 'error',
+      account: (req as any).user.account || 'default',
+      username: (req as any).user.username,
+      error: getErrorMessage(error),
+    });
+    return res.status(500).json({ error: 'Failed to interact with user posts' });
+  }
+});
+
 // Send direct message endpoint
 router.post('/dm', async (req: Request, res: Response) => {
   try {
