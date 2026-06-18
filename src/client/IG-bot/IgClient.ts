@@ -8,6 +8,8 @@ import { IGpassword, IGusername } from "../../secret";
 import logger from "../../config/logger";
 import { Instagram_cookiesExist, loadCookies, saveCookies, getIgDailyState, incrementIgDailyCount, getIgCooldown, setIgCooldown } from "../../utils";
 import { getIgProfile } from "../../config/igProfile";
+import { getNumberEnv, getBoolEnv } from "../../utils/env";
+import path from "path";
 import { setLastRunSummary } from "../../utils/igRunSummary";
 import { getCommentFilterConfig, shouldSkipComment } from "../../utils/commentFilters";
 import { runAgent } from "../../Agent";
@@ -27,11 +29,34 @@ puppeteerExtra.use(
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Hard-shape an AI comment to "at most `maxWords` words + exactly one emoji".
+// Keeps the model's own emoji when present; otherwise appends a varied fallback
+// so comments don't all end identically. `seed` (e.g. the post index) picks the
+// fallback deterministically.
+const FALLBACK_EMOJIS = ['🔥', '❤️', '😍', '👏', '✨', '🙌', '💯', '🤩'];
+const enforceShortComment = (raw: string, maxWords: number, seed = 0): string => {
+    if (!raw) return raw;
+    const emojiRe = /\p{Extended_Pictographic}/gu;
+    const foundEmojis = raw.match(emojiRe) || [];
+    // Strip emojis out so word-counting isn't thrown off by space-separated ones.
+    const textOnly = raw.replace(emojiRe, ' ').replace(/\s+/g, ' ').trim();
+    const words = textOnly ? textOnly.split(' ') : [];
+    const capped = words
+        .slice(0, Math.max(1, maxWords))
+        .join(' ')
+        .replace(/[.,;:!?\s]+$/u, '');
+    const emoji = foundEmojis[0] || FALLBACK_EMOJIS[seed % FALLBACK_EMOJIS.length];
+    return capped ? `${capped} ${emoji}` : emoji;
+};
+
 export class IgClient {
     private browser: puppeteer.Browser | null = null;
     private page: puppeteer.Page | null = null;
     private username: string;
     private password: string;
+    // True when we attached to a user-started Chrome via CDP (so close() must
+    // only disconnect, never kill the user's browser).
+    private connectedExternally = false;
 
     constructor(username?: string, password?: string) {
         this.username = username || '';
@@ -39,6 +64,15 @@ export class IgClient {
     }
 
     async init() {
+        // CDP mode: attach to a real Chrome the USER already started (with
+        // --remote-debugging-port) and logged into Instagram in. A genuine,
+        // user-launched browser passes IG's reCAPTCHA where an automated launch
+        // cannot, so this is the reliable way in. We never launch or kill it.
+        if (getBoolEnv("IG_CONNECT_CDP", false)) {
+            await this.connectToExistingChrome();
+            return;
+        }
+
         // const server = new Server({ port: 8000 });
         // await server.listen();
         // const proxyUrl = server.getProxyUrl();
@@ -51,35 +85,173 @@ export class IgClient {
         const screenHeight = 1080;
         const left = Math.floor((screenWidth - width) / 2);
         const top = Math.floor((screenHeight - height) / 2);
-        this.browser = await puppeteerExtra.launch({
+
+        // Profile mode: launch Chrome with a PERSISTENT user-data dir so the login
+        // session survives across runs. IG's automated-login reCAPTCHA cannot be
+        // solved (it's an invisible risk-score gate that just hangs), so instead
+        // the user signs in MANUALLY once in the visible window and the trusted
+        // session is reused thereafter.
+        const useProfile = getBoolEnv("IG_USE_CHROME_PROFILE", false);
+        const launchOpts: puppeteer.LaunchOptions & { userDataDir?: string } = {
             headless: false,
+            // Cap how long a single CDP call may hang. The default is 180s, so a
+            // stalled page.evaluate burned ~3 min per stuck post and tripped the
+            // error breaker. 45s lets a hung post fail fast and the loop move on.
+            protocolTimeout: getNumberEnv("IG_PROTOCOL_TIMEOUT_MS", 45000),
             args: [
                 `--window-size=${width},${height}`,
-                `--window-position=${left},${top}`
+                `--window-position=${left},${top}`,
             ],
-        });
+        };
+        if (useProfile) {
+            const profileDir = process.env.IG_CHROME_PROFILE_DIR || "./chrome-profile";
+            launchOpts.userDataDir = path.resolve(profileDir);
+            logger.info(`Using persistent Chrome profile at ${launchOpts.userDataDir}`);
+        }
+        this.browser = await puppeteerExtra.launch(launchOpts);
         this.page = await this.browser.newPage();
-        const userAgent = new UserAgent({ deviceCategory: "desktop" });
-        await this.page.setUserAgent(userAgent.toString());
+        // In profile mode keep Chrome's real fingerprint (no random UA) so the
+        // manually-authenticated session isn't re-flagged on the next launch.
+        if (!useProfile) {
+            const userAgent = new UserAgent({ deviceCategory: "desktop" });
+            await this.page.setUserAgent(userAgent.toString());
+        }
         await this.page.setViewport({ width, height });
 
-        if (await Instagram_cookiesExist()) {
+        if (useProfile) {
+            await this.ensureLoggedInWithProfile();
+        } else if (await Instagram_cookiesExist()) {
             await this.loginWithCookies();
         } else {
             await this.loginWithCredentials();
         }
     }
 
+    // Profile-mode login: rely on a persistent Chrome profile. If the session is
+    // already authenticated we proceed silently; otherwise we wait for the user to
+    // sign in by hand in the open window (no credential typing → no reCAPTCHA wall).
+    private async ensureLoggedInWithProfile(): Promise<void> {
+        if (!this.page) throw new Error("Page not initialized");
+        await this.page
+            .goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" })
+            .catch(() => { /* handled below */ });
+
+        // Clear a transient 500 page if one shows.
+        for (let i = 0; i < 3 && (await this.isErrorPage()); i++) {
+            await delay(3000);
+            await this.page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+        }
+
+        if (await this.ensureHomeFeedReady().catch(() => false)) {
+            logger.info("Chrome profile already has an authenticated Instagram session.");
+            return;
+        }
+
+        const waitMs = getNumberEnv("IG_MANUAL_LOGIN_WAIT_MS", 600000); // 10 min
+        logger.warn(
+            `>>> ACTION NEEDED: log into Instagram MANUALLY in the open Chrome window. ` +
+            `Waiting up to ${Math.round(waitMs / 60000)} min; the session will persist for future runs.`
+        );
+        const start = Date.now();
+        while (Date.now() - start < waitMs) {
+            await delay(5000);
+            if (await this.isErrorPage()) {
+                await this.page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+                continue;
+            }
+            if (!(await this.isOnLoginOrChallenge())) {
+                const ready = await this.ensureHomeFeedReady(8000).catch(() => false);
+                if (ready) {
+                    logger.info("Manual login detected — session ready and will persist.");
+                    return;
+                }
+            }
+        }
+        throw new Error("Manual Instagram login was not completed in time (login required).");
+    }
+
+    // Attach to a user-started Chrome over the DevTools protocol. The user must
+    // launch Chrome with --remote-debugging-port (default 9222) and be logged
+    // into Instagram. We reuse an open instagram.com tab if present.
+    private async connectToExistingChrome(): Promise<void> {
+        const port = getNumberEnv("IG_CDP_PORT", 9222);
+        const browserURL = process.env.IG_CDP_URL || `http://127.0.0.1:${port}`;
+        logger.info(`Connecting to your Chrome at ${browserURL} (CDP mode)...`);
+        try {
+            this.browser = await puppeteer.connect({ browserURL, defaultViewport: null });
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            throw new Error(
+                `Could not connect to Chrome at ${browserURL}. Start Chrome with ` +
+                `--remote-debugging-port=${port} and a dedicated --user-data-dir, then log into Instagram. (${msg})`
+            );
+        }
+        this.connectedExternally = true;
+
+        // Prefer an already-open instagram tab; otherwise reuse or open one.
+        const pages = await this.browser.pages();
+        this.page =
+            pages.find((p) => p.url().includes("instagram.com")) ||
+            pages.find((p) => !!p.url() && p.url() !== "about:blank") ||
+            pages[0] ||
+            (await this.browser.newPage());
+        if (!this.page) this.page = await this.browser.newPage();
+        await this.page.bringToFront().catch(() => {});
+
+        await this.page
+            .goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" })
+            .catch(() => { /* handled below */ });
+        for (let i = 0; i < 3 && (await this.isErrorPage()); i++) {
+            await delay(3000);
+            await this.page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+        }
+
+        if (await this.ensureHomeFeedReady().catch(() => false)) {
+            logger.info("Connected to Chrome — Instagram session is authenticated and ready.");
+            return;
+        }
+
+        const waitMs = getNumberEnv("IG_MANUAL_LOGIN_WAIT_MS", 600000);
+        logger.warn(
+            `>>> Connected, but not logged in. Log into Instagram in YOUR Chrome window now. ` +
+            `Waiting up to ${Math.round(waitMs / 60000)} min...`
+        );
+        const start = Date.now();
+        while (Date.now() - start < waitMs) {
+            await delay(5000);
+            if (await this.isErrorPage()) {
+                await this.page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+                continue;
+            }
+            if (!(await this.isOnLoginOrChallenge()) && (await this.ensureHomeFeedReady(8000).catch(() => false))) {
+                logger.info("Login detected in your Chrome — session ready.");
+                return;
+            }
+        }
+        throw new Error("Instagram login was not completed in the connected Chrome in time (login required).");
+    }
+
     private async loginWithCookies() {
         if (!this.page) throw new Error("Page not initialized");
         const cookies = await loadCookies("./cookies/Instagramcookies.json");
-        if (cookies.length > 0) {
+        // Instagram's `rur` (regional routing) cookie is often persisted with a
+        // deletion marker (expires = -1) or a stale value; re-sending it makes IG
+        // return HTTP 500 ("Sorry, something went wrong") on EVERY page, which the
+        // bot then misreads as a transient "feed not ready". Drop it so IG re-issues
+        // a fresh one on the first response. Also drop any genuinely expired cookies.
+        const nowSec = Date.now() / 1000;
+        const sanitized = cookies.filter(
+            (c: any) =>
+                c.name !== "rur" &&
+                !(typeof c.expires === "number" && c.expires > 0 && c.expires < nowSec)
+        );
+        if (sanitized.length > 0) {
             // browser.setCookie honors partitionKey (page.setCookie drops it),
             // which sessionid needs to actually restore the session.
             if (this.browser) {
-                await this.browser.setCookie(...cookies);
+                await this.browser.setCookie(...sanitized);
             } else {
-                await this.page.setCookie(...cookies);
+                await this.page.setCookie(...sanitized);
             }
         } else {
             logger.warn("No valid cookies found. Falling back to credentials login.");
@@ -93,8 +265,12 @@ export class IgClient {
                 waitUntil: "networkidle2",
             });
             const url = this.page.url();
-            if (url.includes("/login/")) {
-                logger.warn("Cookies are invalid or expired. Falling back to credentials login.");
+            // A stale session jar makes IG serve its HTTP 500 "Sorry, something
+            // went wrong" page (URL stays on instagram.com, so a /login/ check
+            // alone misreads it as success). Treat that as a dead session and
+            // fall back to a clean credentials login.
+            if (url.includes("/login/") || (await this.isErrorPage())) {
+                logger.warn("Cookie session is invalid (login redirect or IG error page). Falling back to credentials login.");
                 await this.loginWithCredentials();
             } else {
                 logger.info("Successfully logged in with cookies.");
@@ -108,6 +284,39 @@ export class IgClient {
         } catch (error) {
             logger.warn("Login with cookies failed. Falling back to credentials login.");
             await this.loginWithCredentials();
+        }
+    }
+
+    // Detects Instagram's generic HTTP 500 wall ("Sorry, something went wrong").
+    // It renders title "Error" with that body text while the URL stays on a
+    // normal instagram.com path, so URL checks miss it.
+    private async isErrorPage(): Promise<boolean> {
+        if (!this.page) return false;
+        try {
+            return await this.page.evaluate(() => {
+                const body = document.body ? document.body.innerText : "";
+                return (
+                    /sorry, something went wrong/i.test(body) ||
+                    (document.title === "Error" && /something went wrong/i.test(body))
+                );
+            });
+        } catch {
+            return false;
+        }
+    }
+
+    // Wipes all browser cookies so a credentials login starts from a clean slate.
+    // A poisoned session jar otherwise keeps 500-ing even on /accounts/login/.
+    private async clearAllCookies(): Promise<void> {
+        if (!this.page) return;
+        try {
+            const cdp = await this.page.target().createCDPSession();
+            await cdp.send("Network.clearBrowserCookies");
+        } catch (e) {
+            try {
+                const existing = await this.page.cookies();
+                if (existing.length) await this.page.deleteCookie(...existing);
+            } catch { /* best effort */ }
         }
     }
 
@@ -186,8 +395,10 @@ export class IgClient {
     // Instagram increasingly gates automated logins behind reCAPTCHA / a
     // checkpoint challenge. Because the browser is non-headless, the user can
     // solve it in the visible window — poll until we land back on a normal page.
-    private async waitForManualChallengeResolution(maxWaitMs = 180000): Promise<boolean> {
+    private async waitForManualChallengeResolution(maxWaitMs?: number): Promise<boolean> {
         if (!this.page) return false;
+        // Default 6 min; override with IG_CHALLENGE_WAIT_MS for slower manual solves.
+        const waitMs = maxWaitMs ?? getNumberEnv("IG_CHALLENGE_WAIT_MS", 360000);
         const isChallenge = () => {
             const url = this.page!.url();
             return url.includes("/auth_platform/recaptcha") ||
@@ -196,9 +407,9 @@ export class IgClient {
                 url.includes("/two_factor");
         };
         if (!isChallenge()) return true;
-        logger.warn("Instagram presented a reCAPTCHA/challenge. Waiting up to 3 min for manual resolution in the open browser window...");
+        logger.warn(`Instagram presented a reCAPTCHA/challenge. Waiting up to ${Math.round(waitMs / 60000)} min for manual resolution in the open browser window...`);
         const start = Date.now();
-        while (Date.now() - start < maxWaitMs) {
+        while (Date.now() - start < waitMs) {
             await delay(3000);
             if (!isChallenge()) {
                 logger.info("Challenge resolved — continuing.");
@@ -217,6 +428,9 @@ export class IgClient {
         if (!this.page || !this.browser) throw new Error("Browser/Page not initialized");
         try {
             logger.info("Logging in with credentials...");
+            // Drop any poisoned session jar first — a stale sessionid keeps IG
+            // 500-ing even on the login page, defeating the whole re-login.
+            if (!retry) await this.clearAllCookies();
             await this.page.goto("https://www.instagram.com/accounts/login/", {
                 waitUntil: "networkidle2",
             });
@@ -330,10 +544,26 @@ export class IgClient {
             return false;
         }
 
-        // Navigate to home if we're not already there
+        // (Re)load the home feed. If we're stuck on IG's 500 error page the URL is
+        // still instagram.com/, so a plain "are we on instagram?" check would never
+        // reload it — force a navigation when the error page is showing too.
         const url = this.page.url();
-        if (!url.startsWith("https://www.instagram.com/")) {
+        if (!url.startsWith("https://www.instagram.com/") || (await this.isErrorPage())) {
             await this.page.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
+        }
+
+        // IG's 500 wall is sometimes transient — reload a few times before giving up.
+        for (let attempt = 0; attempt < 3 && (await this.isErrorPage()); attempt++) {
+            logger.warn(`Instagram served its error page (HTTP 500), attempt ${attempt + 1}/3. Reloading...`);
+            await delay(3000);
+            try { await this.page.reload({ waitUntil: "domcontentloaded" }); } catch { /* ignore */ }
+        }
+        // A persistent error page means the session jar is dead — throw a
+        // login-flagged error so the agent loop re-logins (which now clears the
+        // poisoned cookies and signs in with credentials) instead of spinning.
+        if (await this.isErrorPage()) {
+            try { await this.page.screenshot({ path: "./cookies/feed-debug.png" }); } catch { /* ignore */ }
+            throw new Error("Instagram is serving its error page (HTTP 500); session likely dead — login required.");
         }
 
         try {
@@ -615,7 +845,35 @@ export class IgClient {
         let postIndex = 1; // Start with the first post
         const maxPosts = profile.maxPostsPerRun; // Limit to prevent infinite scrolling
         let commentsLeft = profile.maxCommentsPerRun;
+        // Don't comment on every post in a row — leave likes on all of them but
+        // skip 1-2 posts between comments so the activity looks organic. The first
+        // eligible post still gets a comment; after each comment we set how many of
+        // the next posts to skip (random within the configured min/max).
+        const commentSkipMin = Math.max(0, getNumberEnv('IG_COMMENT_SKIP_MIN', 1));
+        const commentSkipMax = Math.max(commentSkipMin, getNumberEnv('IG_COMMENT_SKIP_MAX', 2));
+        let skipBeforeNextComment = 0;
         const page = this.page;
+        // Recovery state: when the feed is exhausted or a page call wedges, reload
+        // instagram.com and keep going on a fresh feed instead of ending the run.
+        // `commentedUsers` prevents double-commenting authors that reappear after a
+        // reload (likes are already guarded by the Unlike check).
+        const maxReloads = getNumberEnv("IG_FEED_RELOADS", 6);
+        let reloads = 0;
+        const commentedUsers = new Set<string>();
+        const reloadFeed = async (): Promise<boolean> => {
+            if (reloads >= maxReloads) return false;
+            reloads++;
+            console.log(`Reloading Instagram to continue (reload ${reloads}/${maxReloads})...`);
+            try {
+                await page.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
+            } catch {
+                // A wedged tab can make goto hang/throw; a direct reload often frees it.
+                await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+            }
+            const ready = await this.ensureHomeFeedReady().catch(() => false);
+            await delay(2000);
+            return ready;
+        };
         while (postIndex <= maxPosts) {
             // Check for exit flag
             if (typeof getShouldExitInteractions === 'function' && getShouldExitInteractions()) {
@@ -624,10 +882,29 @@ export class IgClient {
             }
             try {
                 const postSelector = `article:nth-of-type(${postIndex})`;
-                // Check if the post exists
+                // The feed lazy-loads posts as you scroll. If the next article
+                // isn't mounted yet, scroll to the bottom and wait for IG to
+                // append more before giving up — otherwise a run ends prematurely
+                // the moment we outrun the currently-loaded batch.
                 if (!(await page.$(postSelector))) {
-                    console.log("No more posts found. Ending iteration...");
-                    break;
+                    const maxLoadScrolls = getNumberEnv("IG_FEED_LOAD_SCROLLS", 4);
+                    let loaded = false;
+                    for (let s = 0; s < maxLoadScrolls; s++) {
+                        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+                        await delay(2500);
+                        if (await page.$(postSelector)) { loaded = true; break; }
+                    }
+                    if (!loaded) {
+                        if (await reloadFeed()) {
+                            // Fresh DOM — restart article indexing; keep counts and
+                            // the commented-users set so we don't repeat ourselves.
+                            postIndex = 1;
+                            skipBeforeNextComment = 0;
+                            continue;
+                        }
+                        console.log("No more posts found (feed exhausted, reload budget spent or feed didn't return). Ending iteration...");
+                        break;
+                    }
                 }
 
                 // Skip sponsored/ads
@@ -678,7 +955,12 @@ export class IgClient {
                 if (username) {
                     console.log(`Post ${postIndex} by @${username}`);
                 } else {
-                    console.log(`Post ${postIndex} username not found.`);
+                    console.log(`Post ${postIndex} username not found. Skipping (likely ad).`);
+                    summary.skippedSponsored++;
+                    await delay(1000);
+                    await page.evaluate(() => { window.scrollBy(0, window.innerHeight); });
+                    postIndex++;
+                    continue;
                 }
                 // Extract and log the post caption
                 const captionSelector = `${postSelector} div.x9f619 span._ap3a div span._ap3a`;
@@ -702,19 +984,23 @@ export class IgClient {
                     );
                     caption = expandedCaption;
                 }
-                // Comment on the post (capped per run by profile.maxCommentsPerRun)
-                if (commentsLeft > 0) {
+                // Comment on the post (capped per run by profile.maxCommentsPerRun).
+                // Honour the comment-skip stride: if we're still in the skip window
+                // after a previous comment, like-only this post and move on.
+                if (commentsLeft > 0 && skipBeforeNextComment > 0) {
+                    skipBeforeNextComment--;
+                    console.log(`Skipping comment on post ${postIndex} (liked only; ${skipBeforeNextComment} more to skip).`);
+                } else if (commentsLeft > 0 && commentedUsers.has(username)) {
+                    console.log(`Already commented on @${username} this session — liking only.`);
+                } else if (commentsLeft > 0) {
                     console.log(`Commenting on post ${postIndex}...`);
                     const wordCap = profile.commentMaxWords;
-                    const prompt = `human-like Instagram comment reacting to this post: "${caption}". STRICT LIMIT: ${wordCap} words maximum (3-${wordCap} words). Casual and specific to the content, light slang/emoji ok, no generic praise, no hashtags.`;
+                    const prompt = `human-like Instagram comment reacting to this post: "${caption}". STRICT LIMIT: at most ${wordCap} words PLUS exactly one emoji at the end (e.g. "love this 🔥"). Casual and specific to the content, no generic praise, no hashtags.`;
                     const schema = getInstagramCommentSchema();
                     const result = await runAgent(schema, prompt);
                     let comment = (Array.isArray(result) ? result[0]?.comment ?? "" : "") as string;
-                    // Hard-enforce the cap in case the model ignores it.
-                    const words = comment.trim().split(/\s+/);
-                    if (words.length > wordCap) {
-                        comment = words.slice(0, wordCap).join(' ').replace(/[,;:]$/, '');
-                    }
+                    // Hard-enforce "max N words + one emoji" in case the model ignores it.
+                    comment = enforceShortComment(comment, wordCap, postIndex);
                     const filterCfg = getCommentFilterConfig();
                     if (!comment) {
                         console.log(`No comment generated for post ${postIndex} (AI unavailable?). Skipping comment.`);
@@ -766,6 +1052,10 @@ export class IgClient {
                             }
                             summary.comments++;
                             commentsLeft--;
+                            commentedUsers.add(username);
+                            // Skip the next 1-2 posts (configurable) before commenting again.
+                            skipBeforeNextComment =
+                                Math.floor(Math.random() * (commentSkipMax - commentSkipMin + 1)) + commentSkipMin;
                             await delay(2500);
                         } else {
                             console.log("Comment box not found.");
@@ -803,15 +1093,33 @@ export class IgClient {
             } catch (error) {
                 console.error(`Error interacting with post ${postIndex}:`, error);
                 summary.errors++;
+                // A protocolTimeout / "target closed" usually means the tab wedged
+                // (heavy feed DOM). Reloading the page frees it far more reliably
+                // than scrolling past — recover and continue on a fresh feed.
+                const msg = error instanceof Error ? error.message : String(error);
+                const wedged = /protocoltimeout|protocol error|target closed|callfunctionon|detached|execution context/i.test(msg);
+                if (wedged) {
+                    try {
+                        if (await reloadFeed()) {
+                            console.log("Recovered after page stall via reload — continuing.");
+                            postIndex = 1;
+                            skipBeforeNextComment = 0;
+                            continue;
+                        }
+                    } catch { /* fall through to the error-budget handling */ }
+                }
                 // One flaky post shouldn't end the whole run, but repeated
-                // failures usually mean the page is broken — stop then.
-                if (summary.errors >= 3) {
+                // failures usually mean the page is broken — stop then. Now that a
+                // hung post fails in ~45s (protocolTimeout) instead of 3 min, a
+                // couple of transient stalls shouldn't abort a long session.
+                const maxPostErrors = getNumberEnv("IG_MAX_POST_ERRORS", 5);
+                if (summary.errors >= maxPostErrors) {
                     console.log("Too many post errors; ending iteration.");
                     break;
                 }
                 await page.evaluate(() => {
                     window.scrollBy(0, window.innerHeight);
-                });
+                }).catch(() => {});
                 postIndex++;
             }
         }
@@ -930,7 +1238,7 @@ export class IgClient {
                     });
                     // Explicit per-call cap wins; otherwise the profile default applies.
                     const wordCap = maxCommentWords && maxCommentWords > 0 ? maxCommentWords : profile.commentMaxWords;
-                    const prompt = `human-like Instagram comment based on the following post: "${caption}". STRICT LIMIT: ${wordCap} words maximum, warm and specific, sound organic (light slang/emoji ok), avoid generic praise.`;
+                    const prompt = `human-like Instagram comment based on the following post: "${caption}". STRICT LIMIT: at most ${wordCap} words PLUS exactly one emoji at the end (e.g. "love this 🔥"), warm and specific, sound organic, avoid generic praise.`;
                     const schema = getInstagramCommentSchema();
                     // The AI free tier occasionally returns empty; retry once.
                     let comment = "";
@@ -939,11 +1247,8 @@ export class IgClient {
                         const result = await runAgent(schema, prompt);
                         comment = (Array.isArray(result) ? result[0]?.comment : "") as string;
                     }
-                    // Hard-enforce the cap in case the model ignores it.
-                    const capWords = comment.trim().split(/\s+/);
-                    if (capWords.length > wordCap) {
-                        comment = capWords.slice(0, wordCap).join(' ').replace(/[,;:]$/, '');
-                    }
+                    // Hard-enforce "max N words + one emoji" in case the model ignores it.
+                    comment = enforceShortComment(comment, wordCap, summary.postsVisited);
                     const filterCfg = getCommentFilterConfig();
                     if (!comment) {
                         logger.warn(`No comment generated for ${link} (AI unavailable?). Skipping comment.`);
@@ -1102,7 +1407,12 @@ export class IgClient {
 
     public async close() {
         if (this.browser) {
-            await this.browser.close();
+            // In CDP mode the browser is the user's own Chrome — only detach.
+            if (this.connectedExternally) {
+                try { this.browser.disconnect(); } catch { /* ignore */ }
+            } else {
+                await this.browser.close();
+            }
             this.browser = null;
             this.page = null;
         }

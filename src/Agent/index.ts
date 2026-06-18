@@ -51,26 +51,50 @@ export async function runAgent(
   const primaryModel = process.env.GEMINI_MODEL || "gemini-2.5-flash";
   const fallbackModel = process.env.GEMINI_FALLBACK_MODEL || "gemini-2.5-flash-lite";
 
+  // When Google is overloaded both the primary and fallback models return 503.
+  // A single fallback isn't enough — back off and retry the whole pair a few
+  // times so a transient demand spike doesn't cost us the comment outright.
+  const overloadRetries = Number(process.env.GEMINI_OVERLOAD_RETRIES || 3);
+  const overloadBackoffMs = Number(process.env.GEMINI_OVERLOAD_BACKOFF_MS || 4000);
+  const isOverloaded = (e: any) => {
+    const m = e instanceof Error ? e.message : String(e);
+    const s = m.toLowerCase();
+    return m.includes("503") || s.includes("unavailable") || s.includes("high demand") || s.includes("overloaded");
+  };
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
   try {
     let result;
-    try {
-      result = await ai.models.generateContent({
-        model: primaryModel,
-        contents: prompt,
-        config: generationConfig,
-      });
-    } catch (primaryError: any) {
-      const msg = primaryError instanceof Error ? primaryError.message : String(primaryError);
-      const overloaded = msg.includes("503") || msg.toLowerCase().includes("unavailable") || msg.toLowerCase().includes("high demand");
-      if (overloaded && fallbackModel && fallbackModel !== primaryModel) {
-        logger.warn(`${primaryModel} is overloaded (503). Retrying with ${fallbackModel}...`);
-        result = await ai.models.generateContent({
-          model: fallbackModel,
-          contents: prompt,
-          config: generationConfig,
-        });
-      } else {
-        throw primaryError;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        try {
+          result = await ai.models.generateContent({
+            model: primaryModel,
+            contents: prompt,
+            config: generationConfig,
+          });
+        } catch (primaryError: any) {
+          if (isOverloaded(primaryError) && fallbackModel && fallbackModel !== primaryModel) {
+            logger.warn(`${primaryModel} is overloaded (503). Retrying with ${fallbackModel}...`);
+            result = await ai.models.generateContent({
+              model: fallbackModel,
+              contents: prompt,
+              config: generationConfig,
+            });
+          } else {
+            throw primaryError;
+          }
+        }
+        break; // got a result
+      } catch (bothError: any) {
+        // Both models overloaded — back off and retry a bounded number of times.
+        if (isOverloaded(bothError) && attempt < overloadRetries) {
+          const wait = overloadBackoffMs * (attempt + 1);
+          logger.warn(`Gemini overloaded on both models; backing off ${wait}ms (retry ${attempt + 1}/${overloadRetries})...`);
+          await sleep(wait);
+          continue;
+        }
+        throw bothError; // out of retries or a non-overload error → outer handler
       }
     }
 

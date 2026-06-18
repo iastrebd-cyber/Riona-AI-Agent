@@ -132,3 +132,20 @@ public/build
 # Plop js template files
 .plop-templates
 logged_in.png
+
+# Persistent Chrome profile for IG manual login (contains session)
+chrome-profile/
+
+# Playwright MCP scratch dir
+.playwright-mcp/
+
+# Local-only diagnostic / one-off runner scripts (not part of the app)
+diag-cdp.js
+diag-login.js
+diag-login2.js
+diag2.js
+diag3.js
+diag4.js
+run-1h.js
+run-session.js
+cookies/raw-export.json
