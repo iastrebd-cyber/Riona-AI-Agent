@@ -205,6 +205,7 @@ Open `http://localhost:3000/dashboard` for live status and the last IG run summa
 ## Guides
 
 - `Guides/Instagram-Bot.md`
+- `Guides/Limits.md`
 - `Guides/Operations.md`
 - `Guides/API.md`
 - `Guides/Env.md`
