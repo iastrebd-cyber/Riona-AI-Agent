@@ -284,6 +284,50 @@ export const setIgCooldown = async (minutes: number): Promise<void> => {
   }
 };
 
+// ---------------------- Replied-comment memory (own-post replies) ----------------------
+// Remembers which comments we've already replied to (keyed by a stable
+// post+author+text signature) so re-runs never reply to the same comment twice.
+export const getRepliedComments = async (): Promise<Set<string>> => {
+  const dataPath = path.join(__dirname, "../data/igRepliedComments.json");
+  try {
+    await fs.access(dataPath);
+    const data = await fs.readFile(dataPath, "utf-8");
+    const json = JSON.parse(data);
+    const keys: string[] = Array.isArray(json) ? json.map((e: any) => (typeof e === "string" ? e : e.key)) : [];
+    return new Set(keys.filter(Boolean));
+  } catch {
+    return new Set();
+  }
+};
+
+export const addRepliedComments = async (keys: string[]): Promise<void> => {
+  if (!keys.length) return;
+  const dataPath = path.join(__dirname, "../data/igRepliedComments.json");
+  const dataDir = path.dirname(dataPath);
+  let existing: any[] = [];
+  try {
+    const data = await fs.readFile(dataPath, "utf-8");
+    const parsed = JSON.parse(data);
+    if (Array.isArray(parsed)) existing = parsed;
+  } catch {
+    existing = [];
+  }
+  const now = Date.now();
+  const seen = new Set(existing.map((e: any) => (typeof e === "string" ? e : e.key)));
+  for (const k of keys) {
+    if (!seen.has(k)) existing.push({ key: k, at: now });
+  }
+  // Keep the file bounded: drop entries older than 60 days.
+  const cutoff = now - 60 * 24 * 60 * 60 * 1000;
+  existing = existing.filter((e: any) => typeof e === "string" || !e.at || e.at >= cutoff);
+  try {
+    await fs.mkdir(dataDir, { recursive: true });
+    await fs.writeFile(dataPath, JSON.stringify(existing, null, 2));
+  } catch (error) {
+    logger.error("Error writing igRepliedComments:", error);
+  }
+};
+
 // ---------------------- Scraped data utilities ----------------------
 export const saveScrapedData = async (link: string, content: string): Promise<void> => {
   const scrapedDataPath = path.join(__dirname, "../data/scrapedData.json");

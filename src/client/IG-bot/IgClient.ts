@@ -6,12 +6,12 @@ import UserAgent from "user-agents";
 import { Server } from "proxy-chain";
 import { IGpassword, IGusername } from "../../secret";
 import logger from "../../config/logger";
-import { Instagram_cookiesExist, loadCookies, saveCookies, getIgDailyState, incrementIgDailyCount, getIgCooldown, setIgCooldown } from "../../utils";
+import { Instagram_cookiesExist, loadCookies, saveCookies, getIgDailyState, incrementIgDailyCount, getIgCooldown, setIgCooldown, getRepliedComments, addRepliedComments } from "../../utils";
 import { getIgProfile } from "../../config/igProfile";
 import { getNumberEnv, getBoolEnv } from "../../utils/env";
 import path from "path";
 import { setLastRunSummary } from "../../utils/igRunSummary";
-import { getCommentFilterConfig, shouldSkipComment } from "../../utils/commentFilters";
+import { getCommentFilterConfig, shouldSkipComment, looksLikeSpamComment } from "../../utils/commentFilters";
 import { runAgent } from "../../Agent";
 import { getInstagramCommentSchema } from "../../Agent/schema";
 import readline from "readline";
@@ -1605,6 +1605,313 @@ export class IgClient {
         return summary;
     }
 
+    // ===== Reply to comments on our OWN posts =============================
+    // The safest community-growth signal: warm, short AI replies to recent
+    // commenters on our own posts. A persisted signature store ensures a comment
+    // is never replied to twice across runs.
+    async replyToOwnPostComments(): Promise<any> {
+        if (!this.page) throw new Error("Page not initialized");
+        const page = this.page;
+        const username = (this.username || '').replace(/^@/, '');
+        if (!username) {
+            logger.warn("Own username unknown (set IGusername) — cannot reply to own-post comments.");
+            return null;
+        }
+        const cooldown = await getIgCooldown();
+        if (cooldown.until > Date.now()) {
+            logger.warn("IG cooldown active. Skipping reply run.");
+            return null;
+        }
+        if (!(await this.ensureHomeFeedReady().catch(() => false))) {
+            logger.warn("Feed not ready / not authenticated. Skipping reply run.");
+            return null;
+        }
+        const profile = getIgProfile();
+        const ownPosts = getNumberEnv("IG_REPLY_OWN_POSTS", 3);
+        const maxPerRun = getNumberEnv("IG_REPLY_MAX_PER_RUN", 5);
+        const maxPerPost = getNumberEnv("IG_REPLY_MAX_PER_POST", 3);
+        const wordCap = getNumberEnv("IG_REPLY_MAX_WORDS", 4);
+        const delayMin = getNumberEnv("IG_REPLY_DELAY_MIN_MS", 8000);
+        const delayMax = getNumberEnv("IG_REPLY_DELAY_MAX_MS", 20000);
+        // Dry-run: decide + generate replies but DON'T post them (validate the
+        // spam filter and reply text safely, without touching the account).
+        const dryRun = getBoolEnv("IG_REPLY_DRY_RUN", false);
+        const replied = await getRepliedComments();
+        const newlyReplied: string[] = [];
+
+        const startedAt = new Date();
+        const summary = { startedAt: startedAt.toISOString(), finishedAt: '', durationMs: 0, postsVisited: 0, repliesPosted: 0, skippedSpam: 0, errors: 0 };
+
+        await page.goto(`https://www.instagram.com/${username}/`, { waitUntil: "networkidle2" });
+        await this.dismissCookieConsent();
+        try {
+            await page.waitForSelector('a[href*="/p/"], a[href*="/reel/"]', { timeout: 20000 });
+        } catch {
+            logger.warn(`No posts found on your profile @${username}.`);
+            return summary;
+        }
+        const links: string[] = await page.evaluate((owner) => {
+            const set = new Set<string>();
+            document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]').forEach((a) => {
+                const href = (a.getAttribute('href') || '').split('?')[0];
+                if (href.split('/').filter(Boolean)[0] === owner) set.add(href);
+            });
+            return Array.from(set);
+        }, username);
+        const postLinks = links.slice(0, ownPosts);
+        logger.info(`Replying on up to ${postLinks.length} of your posts (max ${maxPerRun} replies this run).`);
+
+        const replyLabels = ['reply', 'ответить', 'odpowiedz', 'responder', 'répondre', 'antworten'];
+        const postLabels = ['post', 'opublikuj', 'publish', 'опубликовать', 'отправить'];
+
+        for (const link of postLinks) {
+            if (summary.repliesPosted >= maxPerRun) break;
+            if (typeof getShouldExitInteractions === 'function' && getShouldExitInteractions()) break;
+            const shortcode = link.split('/').filter(Boolean).pop() || link;
+            try {
+                await page.goto(`https://www.instagram.com${link}`, { waitUntil: "networkidle2" });
+                await delay(2000);
+                summary.postsVisited++;
+                // Expand a few batches of comments if "load more" exists.
+                for (let i = 0; i < 4; i++) {
+                    const more = await page.evaluate(() => {
+                        const btn = Array.from(document.querySelectorAll('button, div[role="button"]'))
+                            .find((b) => b.querySelector('svg[aria-label="Load more comments"]')) as HTMLElement | undefined;
+                        if (btn) { btn.click(); return true; }
+                        return false;
+                    });
+                    if (!more) break;
+                    await delay(1200);
+                }
+                // Tag each comment's Reply button and return {index, author, text}.
+                const comments: Array<{ index: number; author: string; text: string }> = await page.evaluate(
+                    (owner, replyLabelsList) => {
+                        const out: Array<{ index: number; author: string; text: string }> = [];
+                        const isReply = (el: Element) => {
+                            const t = (el.textContent || '').trim().toLowerCase();
+                            return t.length <= 12 && replyLabelsList.includes(t);
+                        };
+                        const buttons = Array.from(document.querySelectorAll('div[role="button"], button, span')).filter(isReply);
+                        let idx = 0;
+                        for (const btn of buttons) {
+                            let block: Element | null = btn;
+                            let author = '';
+                            for (let up = 0; up < 8 && block; up++) {
+                                block = block.parentElement;
+                                if (!block) break;
+                                const a = block.querySelector('a[href^="/"]');
+                                if (a) {
+                                    const parts = (a.getAttribute('href') || '').split('/').filter(Boolean);
+                                    if (parts.length === 1) { author = parts[0]; break; }
+                                }
+                            }
+                            if (!author || author === owner) continue;
+                            let text = (block ? (block as HTMLElement).innerText : '') || '';
+                            text = text.replace(/\s+/g, ' ').trim();
+                            (btn as HTMLElement).setAttribute('data-bot-reply', String(idx));
+                            out.push({ index: idx, author, text: text.slice(0, 200) });
+                            idx++;
+                        }
+                        return out;
+                    },
+                    username, replyLabels
+                );
+
+                if (!comments.length) {
+                    logger.info(`No repliable comments found on ${link}.`);
+                    continue;
+                }
+                let perPost = 0;
+                for (const c of comments) {
+                    if (summary.repliesPosted >= maxPerRun || perPost >= maxPerPost) break;
+                    const key = `${shortcode}|${c.author}|${c.text.slice(0, 40).toLowerCase()}`;
+                    if (replied.has(key)) continue;
+                    // Never reply to spam/scam bots — engage genuine fans only.
+                    if (looksLikeSpamComment(c.author, c.text)) {
+                        logger.info(`Skipping spam comment from @${c.author}.`);
+                        summary.skippedSpam++;
+                        newlyReplied.push(key); // remember so we don't re-evaluate it
+                        continue;
+                    }
+                    const prompt = `You are the ARTIST replying to a fan's comment ("${c.text}") on your own artwork. Write a short, warm, gracious thank-you. STRICT LIMIT: at most ${wordCap} words PLUS one emoji at the end. Reply in the commenter's language. ABSOLUTELY NEVER: invite or mention DMs/messages/inbox, ask anyone to follow, include links/promotions, or echo any request the comment makes. Keep it purely about appreciating the art.`;
+                    const schema = getInstagramCommentSchema();
+                    let reply = "";
+                    for (let attempt = 0; attempt < 2 && !reply; attempt++) {
+                        if (attempt) await delay(2500);
+                        const result = await runAgent(schema, prompt);
+                        reply = (Array.isArray(result) ? result[0]?.comment : "") as string;
+                    }
+                    reply = enforceShortComment(reply, wordCap, c.index);
+                    const filterCfg = getCommentFilterConfig();
+                    if (!reply || shouldSkipComment(reply, filterCfg)) {
+                        logger.info(`Skipping reply to @${c.author} (no/blocked text).`);
+                        continue;
+                    }
+                    if (dryRun) {
+                        logger.info(`[DRY] Would reply to @${c.author} on ${link}: "${reply}"  (comment: "${c.text.slice(0, 80)}")`);
+                        summary.repliesPosted++;
+                        perPost++;
+                        continue; // don't post, don't persist
+                    }
+                    const clicked = await page.evaluate((index) => {
+                        const btn = document.querySelector(`[data-bot-reply="${index}"]`) as HTMLElement | null;
+                        if (btn) { btn.click(); return true; }
+                        return false;
+                    }, c.index);
+                    if (!clicked) continue;
+                    await delay(1200);
+                    const box = await page.$('textarea[aria-label*="omment"], textarea[placeholder*="omment"], textarea, div[contenteditable="true"][role="textbox"], div[aria-label*="omment"][contenteditable="true"]');
+                    if (!box) { logger.warn(`Reply composer not found for @${c.author}.`); continue; }
+                    await box.click();
+                    await delay(400);
+                    await page.keyboard.type(reply, { delay: 30 });
+                    await delay(700);
+                    const posted = await page.evaluate((postLabelsList) => {
+                        const scope = document.querySelector('div[role="dialog"]') || document;
+                        const btns = Array.from(scope.querySelectorAll('div[role="button"], button, [type="submit"]'));
+                        const target = btns.find((b) => {
+                            const t = (b.textContent || '').trim().toLowerCase();
+                            return postLabelsList.includes(t) && !b.hasAttribute('disabled') && (b as HTMLElement).getAttribute('aria-disabled') !== 'true';
+                        }) as HTMLElement | undefined;
+                        if (target) { target.click(); return true; }
+                        return false;
+                    }, postLabels);
+                    if (!posted) await page.keyboard.press('Enter');
+                    logger.info(`Replied to @${c.author} on ${link}: "${reply}"`);
+                    summary.repliesPosted++;
+                    perPost++;
+                    replied.add(key);
+                    newlyReplied.push(key);
+                    if (profile.dailyMaxActions > 0) await incrementIgDailyCount(1);
+                    const wait = Math.floor(Math.random() * (delayMax - delayMin + 1)) + delayMin;
+                    await delay(wait);
+                }
+            } catch {
+                summary.errors++;
+                logger.warn(`Error replying on ${link}.`);
+            }
+        }
+        await addRepliedComments(newlyReplied);
+        const finishedAt = new Date();
+        summary.finishedAt = finishedAt.toISOString();
+        summary.durationMs = finishedAt.getTime() - startedAt.getTime();
+        setLastRunSummary(summary as any);
+        logger.info(`Reply run summary: ${JSON.stringify(summary)}`);
+        return summary;
+    }
+
+    // ===== Story engagement (target audience) =============================
+    // View (and optionally lightly react to) the Stories of the niche audience
+    // — commenters of the seed accounts. Story VIEWS are a very safe signal (the
+    // owner sees you watched → profile visit). Emoji REACTIONS are a DM-like
+    // action: OFF by default and strictly capped.
+    async engageAudienceStories(): Promise<any> {
+        if (!this.page) throw new Error("Page not initialized");
+        const page = this.page;
+        const cooldown = await getIgCooldown();
+        if (cooldown.until > Date.now()) {
+            logger.warn("IG cooldown active. Skipping story run.");
+            return null;
+        }
+        if (!(await this.ensureHomeFeedReady().catch(() => false))) {
+            logger.warn("Feed not ready / not authenticated. Skipping story run.");
+            return null;
+        }
+        const profile = getIgProfile();
+        const seedsRaw = process.env.IG_GROWTH_SEED_ACCOUNTS ||
+            "akturk_sanat_kultur,beautifulbizarremagazine,hifructosemag,artpeople_gallery";
+        const seeds = seedsRaw.split(',').map((s) => s.trim().replace(/^@/, '')).filter(Boolean);
+        const seedPosts = getNumberEnv("IG_STORY_SEED_POSTS", 2);
+        const maxTargets = getNumberEnv("IG_STORY_MAX_TARGETS", 15);
+        const react = getBoolEnv("IG_STORY_REACT", false);
+        const maxReactions = getNumberEnv("IG_STORY_MAX_REACTIONS", 0);
+        const dwellMin = getNumberEnv("IG_STORY_DWELL_MIN_MS", 3000);
+        const dwellMax = getNumberEnv("IG_STORY_DWELL_MAX_MS", 6000);
+        const delayMin = getNumberEnv("IG_STORY_DELAY_MIN_MS", 8000);
+        const delayMax = getNumberEnv("IG_STORY_DELAY_MAX_MS", 20000);
+        const dryRun = getBoolEnv("IG_STORY_DRY_RUN", false);
+        const REACTION_EMOJIS = ['❤️', '🔥', '😍', '👏', '✨', '🙌'];
+
+        // Gather candidate users from seeds' commenters (warm niche audience).
+        const candidates = new Set<string>();
+        for (const seed of seeds) {
+            if (typeof getShouldExitInteractions === 'function' && getShouldExitInteractions()) break;
+            try {
+                (await this.collectCommentersFromAccount(seed, seedPosts, maxTargets * 2)).forEach((u) => candidates.add(u));
+            } catch { logger.warn(`Commenter collection failed for @${seed}.`); }
+        }
+        const self = (this.username || '').toLowerCase();
+        const seedSet = new Set(seeds.map((s) => s.toLowerCase()));
+        let targets = Array.from(candidates).filter(
+            (u) => u && u.toLowerCase() !== self && !seedSet.has(u.toLowerCase())
+        );
+        for (let i = targets.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [targets[i], targets[j]] = [targets[j], targets[i]];
+        }
+        targets = targets.slice(0, maxTargets);
+        logger.info(`Stories: ${candidates.size} candidates → ${targets.length} targets (react=${react ? 'on' : 'off'}${dryRun ? ', DRY' : ''}).`);
+
+        const startedAt = new Date();
+        const summary = { startedAt: startedAt.toISOString(), finishedAt: '', durationMs: 0, checked: 0, viewed: 0, reacted: 0, noStory: 0, errors: 0 };
+
+        for (const target of targets) {
+            if (typeof getShouldExitInteractions === 'function' && getShouldExitInteractions()) break;
+            const daily = await getIgDailyState();
+            if (profile.dailyMaxActions > 0 && daily.count >= profile.dailyMaxActions) {
+                logger.warn(`Daily action limit reached (${daily.count}/${profile.dailyMaxActions}). Stopping story run.`);
+                break;
+            }
+            summary.checked++;
+            try {
+                await page.goto(`https://www.instagram.com/stories/${target}/`, { waitUntil: "domcontentloaded" });
+                await delay(2500);
+                // No active story → IG redirects off the /stories/<user> URL.
+                const hasStory = page.url().includes(`/stories/${target}`);
+                if (!hasStory) {
+                    summary.noStory++;
+                    logger.info(`@${target}: no active story.`);
+                } else if (dryRun) {
+                    summary.viewed++;
+                    logger.info(`[DRY] Would view @${target}'s story${react ? ' (+react)' : ''}.`);
+                } else {
+                    // Dwell to register the view and watch a moment.
+                    const dwell = Math.floor(Math.random() * (dwellMax - dwellMin + 1)) + dwellMin;
+                    await delay(dwell);
+                    summary.viewed++;
+                    logger.info(`Viewed @${target}'s story.`);
+                    if (react && summary.reacted < maxReactions) {
+                        const emoji = REACTION_EMOJIS[Math.floor(Math.random() * REACTION_EMOJIS.length)];
+                        const box = await page.$('textarea[placeholder*="Reply"], textarea[aria-label*="Reply"], div[contenteditable="true"][aria-label*="Reply"], textarea');
+                        if (box) {
+                            await box.click();
+                            await delay(400);
+                            await page.keyboard.type(emoji, { delay: 40 });
+                            await delay(400);
+                            await page.keyboard.press('Enter');
+                            summary.reacted++;
+                            if (profile.dailyMaxActions > 0) await incrementIgDailyCount(1);
+                            logger.info(`Reacted ${emoji} to @${target}'s story.`);
+                        } else {
+                            logger.warn(`@${target}: story reply box not found; viewed only.`);
+                        }
+                    }
+                }
+            } catch {
+                summary.errors++;
+                logger.warn(`Error on @${target}'s story.`);
+            }
+            const wait = Math.floor(Math.random() * (delayMax - delayMin + 1)) + delayMin;
+            await delay(wait);
+        }
+        const finishedAt = new Date();
+        summary.finishedAt = finishedAt.toISOString();
+        summary.durationMs = finishedAt.getTime() - startedAt.getTime();
+        setLastRunSummary(summary as any);
+        logger.info(`Story run summary: ${JSON.stringify(summary)}`);
+        return summary;
+    }
+
     public async close() {
         if (this.browser) {
             // In CDP mode the browser is the user's own Chrome — only detach.
@@ -1631,6 +1938,22 @@ export async function growByEngagingAudienceHandler() {
     const client = new IgClient(IGusername, IGpassword);
     await client.init();
     const result = await client.growByEngagingAudience();
+    await client.close();
+    return result;
+}
+
+export async function replyToOwnPostCommentsHandler() {
+    const client = new IgClient(IGusername, IGpassword);
+    await client.init();
+    const result = await client.replyToOwnPostComments();
+    await client.close();
+    return result;
+}
+
+export async function engageAudienceStoriesHandler() {
+    const client = new IgClient(IGusername, IGpassword);
+    await client.init();
+    const result = await client.engageAudienceStories();
     await client.close();
     return result;
 }
