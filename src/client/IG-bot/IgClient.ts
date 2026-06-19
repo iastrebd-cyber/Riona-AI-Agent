@@ -1177,14 +1177,19 @@ export class IgClient {
             setLastRunSummary(summary);
             return summary;
         }
-        const links: string[] = await page.evaluate(() => {
+        // Only this profile's OWN posts — the grid page also renders a
+        // "suggested/related" block whose post links belong to other accounts;
+        // keep links whose first path segment is the target username.
+        const links: string[] = await page.evaluate((owner) => {
             const set = new Set<string>();
             document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]').forEach((a) => {
                 const href = a.getAttribute('href');
-                if (href) set.add(href.split('?')[0]);
+                if (!href) return;
+                const clean = href.split('?')[0];
+                if (clean.split('/').filter(Boolean)[0] === owner) set.add(clean);
             });
             return Array.from(set);
-        });
+        }, targetUsername);
         const targetCount = Math.max(maxLikes, maxComments);
         const postLinks = links.slice(0, targetCount);
         logger.info(`Found ${links.length} posts on @${targetUsername}; will process ${postLinks.length}.`);
@@ -1348,20 +1353,26 @@ export class IgClient {
             const followers: string[] = [];
             let previousHeight = 0;
             let currentHeight = 0;
-            maxFollowers = maxFollowers + 4;
             // Scroll and collect followers until we reach the desired amount or can't scroll anymore
-            console.log(maxFollowers);
             while (followers.length < maxFollowers) {
                 // Get all follower links in the current view
                 const newFollowers = await page.evaluate(() => {
-                    const followerElements =
-                        document.querySelectorAll('div a[role="link"]');
-                    return Array.from(followerElements)
-                        .map((element) => element.getAttribute("href"))
-                        .filter(
-                            (href): href is string => href !== null && href.startsWith("/")
-                        )
-                        .map((href) => href.substring(1)); // Remove leading slash
+                    // Scope to the followers modal — querying the whole page picks
+                    // up nav/sidebar/story links (reels/, direct/, stories/...) and
+                    // even our own handle, not actual followers.
+                    const dialog = document.querySelector('div[role="dialog"]');
+                    const scope: ParentNode = dialog || document;
+                    const reserved = ['p', 'reel', 'reels', 'explore', 'accounts', 'direct', 'stories', 'about', 'legal', 'privacy', 'developer', 'ads'];
+                    const out = new Set<string>();
+                    scope.querySelectorAll('a[href^="/"]').forEach((a) => {
+                        const href = (a.getAttribute('href') || '').split('?')[0];
+                        const parts = href.split('/').filter(Boolean);
+                        // Real follower rows link to a single-segment profile path.
+                        if (parts.length === 1 && !reserved.includes(parts[0])) {
+                            out.add(parts[0]);
+                        }
+                    });
+                    return Array.from(out);
                 });
 
                 // Add new unique followers to our list
@@ -1397,12 +1408,201 @@ export class IgClient {
                 previousHeight = currentHeight;
             }
 
-            console.log(`Successfully scraped ${followers.length - 4} followers`);
-            return followers.slice(4, maxFollowers);
+            console.log(`Successfully scraped ${followers.length} followers`);
+            return followers.slice(0, maxFollowers);
         } catch (error) {
             console.error(`Error scraping followers for ${targetAccount}:`, error);
             throw error;
         }
+    }
+
+    // ===== Audience-growth engine =========================================
+    // Collect usernames that ENGAGE with a seed account's content (commenters +
+    // @mentioned users on its recent posts). These are the warmest, most active
+    // people in the niche — a better target pool than random followers.
+    async collectCommentersFromAccount(
+        account: string,
+        maxPosts = 3,
+        maxUsers = 40
+    ): Promise<string[]> {
+        if (!this.page) throw new Error("Page not initialized");
+        const page = this.page;
+        const found = new Set<string>();
+        try {
+            await page.goto(`https://www.instagram.com/${account}/`, { waitUntil: "networkidle2" });
+            await this.dismissCookieConsent();
+            await page.waitForSelector('a[href*="/p/"], a[href*="/reel/"]', { timeout: 20000 });
+        } catch {
+            logger.warn(`Could not open @${account} to collect commenters (private/empty?).`);
+            return [];
+        }
+        const links: string[] = await page.evaluate(() => {
+            const set = new Set<string>();
+            document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]').forEach((a) => {
+                const href = a.getAttribute('href');
+                if (href) set.add(href.split('?')[0]);
+            });
+            return Array.from(set);
+        });
+        // Profile links that are NOT a person (reserved IG paths) must be dropped.
+        const reserved = ['p', 'reel', 'reels', 'explore', 'accounts', 'direct', 'stories', 'about', 'legal', 'privacy', 'developer', 'ads'];
+        for (const link of links.slice(0, maxPosts)) {
+            if (found.size >= maxUsers) break;
+            try {
+                await page.goto(`https://www.instagram.com${link}`, { waitUntil: "networkidle2" });
+                await delay(1500);
+                // Expand a few batches of comments if a "load more" control exists.
+                for (let i = 0; i < 3; i++) {
+                    const more = await page.evaluate(() => {
+                        const btn = Array.from(document.querySelectorAll('button, div[role="button"]'))
+                            .find((b) => b.querySelector('svg[aria-label="Load more comments"]')) as HTMLElement | undefined;
+                        if (btn) { btn.click(); return true; }
+                        return false;
+                    });
+                    if (!more) break;
+                    await delay(1500);
+                }
+                // Collect single-segment username links on the post page (author +
+                // commenters + @mentions); the post owner is excluded as a target.
+                const users: string[] = await page.evaluate((owner, reservedList) => {
+                    const set = new Set<string>();
+                    document.querySelectorAll('a[href^="/"]').forEach((a) => {
+                        const href = a.getAttribute('href') || '';
+                        const parts = href.split('/').filter(Boolean);
+                        if (parts.length === 1) {
+                            const u = parts[0];
+                            if (u && u !== owner && !reservedList.includes(u)) set.add(u);
+                        }
+                    });
+                    return Array.from(set);
+                }, account, reserved);
+                for (const u of users) {
+                    found.add(u);
+                    if (found.size >= maxUsers) break;
+                }
+            } catch {
+                logger.warn(`Failed to read comments on ${link}.`);
+            }
+            await delay(1500);
+        }
+        logger.info(`Collected ${found.size} engagers from @${account}.`);
+        return Array.from(found);
+    }
+
+    // Build a target audience from seed accounts (commenters and/or followers)
+    // and engage each user's posts, reusing interactWithUserPosts so the existing
+    // like/comment caps, AI comment format, and delays all apply. Honours the
+    // shared daily-action budget and cooldown.
+    async growByEngagingAudience(): Promise<any> {
+        if (!this.page) throw new Error("Page not initialized");
+        const cooldown = await getIgCooldown();
+        if (cooldown.until > Date.now()) {
+            const minsLeft = Math.ceil((cooldown.until - Date.now()) / 60000);
+            logger.warn(`IG cooldown active for ~${minsLeft} more minutes. Skipping growth run.`);
+            return null;
+        }
+        if (!(await this.ensureHomeFeedReady().catch(() => false))) {
+            logger.warn("Feed not ready / not authenticated. Skipping growth run.");
+            return null;
+        }
+        const profile = getIgProfile();
+        const seedsRaw = process.env.IG_GROWTH_SEED_ACCOUNTS ||
+            "akturk_sanat_kultur,beautifulbizarremagazine,hifructosemag,artpeople_gallery";
+        const seeds = seedsRaw.split(',').map((s) => s.trim().replace(/^@/, '')).filter(Boolean);
+        // commenters|followers|both. Default 'commenters' — it's the most active
+        // (and reliably scrapeable) audience. 'followers' is best-effort: IG's
+        // followers modal is virtualized and currently yields few real rows.
+        const source = (process.env.IG_GROWTH_SOURCE || 'commenters').toLowerCase();
+        const seedPosts = getNumberEnv("IG_GROWTH_SEED_POSTS", 3);
+        const followersPerSeed = getNumberEnv("IG_GROWTH_FOLLOWERS_PER_SEED", 15);
+        const maxTargets = getNumberEnv("IG_GROWTH_MAX_TARGETS", 20);
+        const likesPerUser = getNumberEnv("IG_GROWTH_LIKES_PER_USER", 2);
+        const commentsPerUser = getNumberEnv("IG_GROWTH_COMMENTS_PER_USER", 0);
+        const userDelayMin = getNumberEnv("IG_GROWTH_USER_DELAY_MIN_MS", 45000);
+        const userDelayMax = getNumberEnv("IG_GROWTH_USER_DELAY_MAX_MS", 90000);
+
+        // 1) Gather candidate users from each seed account.
+        const candidates = new Set<string>();
+        for (const seed of seeds) {
+            if (typeof getShouldExitInteractions === 'function' && getShouldExitInteractions()) break;
+            if (source === 'commenters' || source === 'both') {
+                try {
+                    const c = await this.collectCommentersFromAccount(seed, seedPosts, maxTargets * 2);
+                    c.forEach((u) => candidates.add(u));
+                } catch { logger.warn(`Commenter collection failed for @${seed}.`); }
+            }
+            if (source === 'followers' || source === 'both') {
+                try {
+                    const f = await this.scrapeFollowers(seed, followersPerSeed);
+                    f.forEach((u) => candidates.add(String(u).split('/')[0]));
+                } catch { logger.warn(`Follower scrape failed for @${seed}.`); }
+            }
+        }
+        // Drop ourselves and the seed accounts; shuffle so we don't always hit the
+        // same first names; cap to the per-run target budget.
+        const self = (this.username || '').toLowerCase();
+        const seedSet = new Set(seeds.map((s) => s.toLowerCase()));
+        let targets = Array.from(candidates).filter(
+            (u) => u && u.toLowerCase() !== self && !seedSet.has(u.toLowerCase())
+        );
+        for (let i = targets.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [targets[i], targets[j]] = [targets[j], targets[i]];
+        }
+        targets = targets.slice(0, maxTargets);
+        logger.info(`Growth: ${candidates.size} candidates from ${seeds.length} seed(s) → engaging ${targets.length} (source=${source}).`);
+
+        // 2) Engage each target's posts.
+        const startedAt = new Date();
+        const summary = {
+            startedAt: startedAt.toISOString(),
+            finishedAt: '',
+            durationMs: 0,
+            seeds,
+            source,
+            candidates: candidates.size,
+            engagedUsers: 0,
+            likes: 0,
+            comments: 0,
+            errors: 0,
+        };
+        for (const target of targets) {
+            if (typeof getShouldExitInteractions === 'function' && getShouldExitInteractions()) {
+                logger.info("Exit requested — stopping growth run.");
+                break;
+            }
+            const daily = await getIgDailyState();
+            if (profile.dailyMaxActions > 0 && daily.count >= profile.dailyMaxActions) {
+                logger.warn(`Daily action limit reached (${daily.count}/${profile.dailyMaxActions}). Stopping growth run.`);
+                break;
+            }
+            try {
+                const res = await this.interactWithUserPosts(target, likesPerUser, commentsPerUser, profile.commentMaxWords);
+                summary.engagedUsers++;
+                if (res) {
+                    summary.likes += res.likes || 0;
+                    summary.comments += res.comments || 0;
+                    summary.errors += res.errors || 0;
+                    // interactWithUserPosts doesn't touch the daily counter itself;
+                    // advance the shared budget here so feed + growth runs share it.
+                    if (profile.dailyMaxActions > 0) {
+                        await incrementIgDailyCount((res.likes || 0) + (res.comments || 0));
+                    }
+                }
+            } catch {
+                summary.errors++;
+                logger.warn(`Engagement failed for @${target}.`);
+            }
+            const wait = Math.floor(Math.random() * (userDelayMax - userDelayMin + 1)) + userDelayMin;
+            logger.info(`Waiting ${Math.round(wait / 1000)}s before next target...`);
+            await delay(wait);
+        }
+        const finishedAt = new Date();
+        summary.finishedAt = finishedAt.toISOString();
+        summary.durationMs = finishedAt.getTime() - startedAt.getTime();
+        setLastRunSummary(summary as any);
+        logger.info(`Growth run summary: ${JSON.stringify(summary)}`);
+        return summary;
     }
 
     public async close() {
@@ -1425,4 +1625,12 @@ export async function scrapeFollowersHandler(targetAccount: string, maxFollowers
     const followers = await client.scrapeFollowers(targetAccount, maxFollowers);
     await client.close();
     return followers;
+}
+
+export async function growByEngagingAudienceHandler() {
+    const client = new IgClient(IGusername, IGpassword);
+    await client.init();
+    const result = await client.growByEngagingAudience();
+    await client.close();
+    return result;
 }
