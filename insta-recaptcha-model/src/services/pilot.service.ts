@@ -16,7 +16,7 @@ class PilotService {
      * Launch the "Pilot" context
      */
     async launch(options: { headless: boolean } = { headless: false }) {
-        logger.info('Launching riona Pilot...');
+        logger.info('Launching insta Pilot...');
 
         this.browser = await chromium.launch({
             headless: options.headless,

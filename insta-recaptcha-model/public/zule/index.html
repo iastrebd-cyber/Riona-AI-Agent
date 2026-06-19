@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>riona AI - Live Orchestrator</title>
+    <title>insta AI - Live Orchestrator</title>
     <link
       href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap"
       rel="stylesheet"
@@ -186,7 +186,7 @@
 
   <body>
     <header>
-      <h1>riona AI DASHBOARD</h1>
+      <h1>insta AI DASHBOARD</h1>
       <div id="status-indicator">
         <div class="dot" id="socket-dot"></div>
         <span id="socket-status">OFFLINE</span>
@@ -199,7 +199,7 @@
         <div id="log-container">
           <div class="log-entry system">
             <div class="time">SYSTEM</div>
-            <div class="msg">Awaiting connection from riona Engine...</div>
+            <div class="msg">Awaiting connection from insta Engine...</div>
           </div>
         </div>
       </section>
@@ -247,7 +247,7 @@
         status.innerText = 'OFFLINE';
       });
 
-      socket.on('riona_update', (data) => {
+      socket.on('insta_update', (data) => {
         const entry = document.createElement('div');
         entry.className = `log-entry ${data.type}`;
 

@@ -1,4 +1,4 @@
-# Contributing to riona AI Recaptcha Classifier
+# Contributing to insta AI Recaptcha Classifier
 
 First off, thanks for taking the time to contribute! 🎉
 
@@ -12,8 +12,8 @@ This project and everyone participating in it is governed by the [Code of Conduc
 
 ### Reporting Bugs
 
-- **Ensure the bug was not already reported** by searching on GitHub under [Issues](https://github.com/riona-ai/recaptcha-classifier/issues).
-- If you're unable to find an open issue addressing the problem, [open a new one](https://github.com/riona-ai/recaptcha-classifier/issues/new).
+- **Ensure the bug was not already reported** by searching on GitHub under [Issues](https://github.com/iastrebd-cyber/recaptcha-classifier/issues).
+- If you're unable to find an open issue addressing the problem, [open a new one](https://github.com/iastrebd-cyber/recaptcha-classifier/issues/new).
 
 ### Pull Requests
 

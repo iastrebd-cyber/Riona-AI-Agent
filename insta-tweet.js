@@ -1,2 +1,2 @@
-console.log(`Hey, I’m Riona 🌸
+console.log(`Hey, I’m Insta 🌸
 I help you show up online…and keep it a little dangerous`);

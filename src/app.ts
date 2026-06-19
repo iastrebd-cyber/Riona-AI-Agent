@@ -61,7 +61,7 @@ app.get('/dashboard', (_req, res) => {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Riona Dashboard</title>
+  <title>Insta Dashboard</title>
   <style>
     :root {
       --pink: #ff5fa2;
@@ -155,10 +155,10 @@ app.get('/dashboard', (_req, res) => {
   <div class="wrap">
     <header>
       <div>
-        <h1>Riona Dashboard</h1>
+        <h1>Insta Dashboard</h1>
         <div class="muted">Live status + last run summary</div>
       </div>
-      <div class="tag">Riona 🌸</div>
+      <div class="tag">Insta 🌸</div>
     </header>
 
     <div class="grid">

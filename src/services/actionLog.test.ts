@@ -9,7 +9,7 @@ describe("action log service", () => {
   let tempDir: string;
 
   beforeEach(async () => {
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "riona-action-log-"));
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "insta-action-log-"));
     process.env.ACTION_LOG_PATH = path.join(tempDir, "actionLogs.json");
   });
 
@@ -25,7 +25,7 @@ describe("action log service", () => {
       action: "login",
       status: "success",
       account: "default",
-      username: "riona",
+      username: "insta",
     });
 
     const entries = await listActionLogs({ limit: 10 });

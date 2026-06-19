@@ -1,5 +1,5 @@
 {
-  "name": "riona-ai-agent",
+  "name": "insta-ai-agent",
   "version": "1.0.0",
   "main": "src/index.ts",
   "scripts": {
@@ -16,16 +16,24 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check:env": "node scripts/check-env.js",
     "setup": "node scripts/setup.js",
-    "recaptcha:dev": "TS_NODE_PROJECT=riona-recaptcha-model/tsconfig.json ts-node -r tsconfig-paths/register riona-recaptcha-model/src/scripts/start.ts",
-    "recaptcha:train": "TS_NODE_PROJECT=riona-recaptcha-model/tsconfig.json ts-node -r tsconfig-paths/register riona-recaptcha-model/src/scripts/train.ts",
-    "recaptcha:collect": "TS_NODE_PROJECT=riona-recaptcha-model/tsconfig.json ts-node -r tsconfig-paths/register riona-recaptcha-model/src/scripts/collect_data.ts",
-    "recaptcha:build": "tsc -p riona-recaptcha-model/tsconfig.json && tsc-alias -p riona-recaptcha-model/tsconfig.json",
-    "recaptcha:serve": "node riona-recaptcha-model/dist/scripts/start.js"
+    "recaptcha:dev": "TS_NODE_PROJECT=insta-recaptcha-model/tsconfig.json ts-node -r tsconfig-paths/register insta-recaptcha-model/src/scripts/start.ts",
+    "recaptcha:train": "TS_NODE_PROJECT=insta-recaptcha-model/tsconfig.json ts-node -r tsconfig-paths/register insta-recaptcha-model/src/scripts/train.ts",
+    "recaptcha:collect": "TS_NODE_PROJECT=insta-recaptcha-model/tsconfig.json ts-node -r tsconfig-paths/register insta-recaptcha-model/src/scripts/collect_data.ts",
+    "recaptcha:build": "tsc -p insta-recaptcha-model/tsconfig.json && tsc-alias -p insta-recaptcha-model/tsconfig.json",
+    "recaptcha:serve": "node insta-recaptcha-model/dist/scripts/start.js"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "Riona-AI-Agent is an AI-powered automation tool designed to interact with various social media platforms.",
+  "author": "iastrebd-cyber",
+  "license": "MIT",
+  "description": "Insta-AI-Agent is an AI-powered automation tool designed to interact with various social media platforms.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/iastrebd-cyber/insta-ai-agent.git"
+  },
+  "homepage": "https://github.com/iastrebd-cyber/insta-ai-agent",
+  "bugs": {
+    "url": "https://github.com/iastrebd-cyber/insta-ai-agent/issues"
+  },
   "dependencies": {
     "@google/genai": "^1.45.0",
     "@tensorflow/tfjs": "^4.22.0",

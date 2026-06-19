@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in improving Riona AI Agent.
+Thanks for your interest in improving Insta AI Agent.
 
 ## Getting Started
 1. Fork the repo and create a feature branch.

@@ -12,7 +12,7 @@ const AUTH_TOKEN = 'efdca2bcebdf23cb9f7c5d323442c88ec8d02aaa'; // User should re
 
 async function testDrive() {
     try {
-        logger.info('Starting riona Engine Test Drive...');
+        logger.info('Starting insta Engine Test Drive...');
 
         // 1. Setup DB
         await connectDB();
@@ -36,7 +36,7 @@ async function testDrive() {
             ]);
             logger.info('Cookies injected for x.com');
         } else {
-            logger.warn('No auth_token provided. riona will land on the login page.');
+            logger.warn('No auth_token provided. insta will land on the login page.');
         }
 
         // 4. Start Errand

@@ -1,4 +1,4 @@
-# Riona AI Agent Roadmap
+# Insta AI Agent Roadmap
 
 This roadmap is based on the current codebase state and is meant to guide ongoing development. Items marked as completed are already implemented in the repository.
 
@@ -116,7 +116,7 @@ This roadmap is based on the current codebase state and is meant to guide ongoin
   'tertiaryBorderColor': '#ffd9a8'
 }}}%%
 timeline
-  title Riona AI Agent Roadmap
+  title Insta AI Agent Roadmap
   Current (Done) : Core API + auth
                  : Instagram automation
                  : AI comment generation

@@ -1,16 +1,16 @@
 <picture>
-  <img alt="RIONA AI Banner" src="public/RIONA-banner.png" width="100%">
+  <img alt="INSTA AI Banner" src="public/INSTA-banner.png" width="100%">
 </picture>
 
 <br />
 
-# RIONA AI - reCAPTCHA Classification Model
+# INSTA AI - reCAPTCHA Classification Model
 
-Welcome to the RIONA AI reCAPTCHA Screenshot Classification Model, a core component of the RIONA AI project. RIONA AI is the first AI ghost that automates Twitter (X) logins like a human, bypassing security measures and solving reCAPTCHAs silently. This repository contains a TensorFlow.js-based convolutional neural network (CNN) designed to classify Twitter reCAPTCHA seating arrangement screenshots as "correct" or "incorrect," ensuring RIONA AI's automation can validate successful solutions to challenges like "move the person to the indicated seat."
+Welcome to the INSTA AI reCAPTCHA Screenshot Classification Model, a core component of the INSTA AI project. INSTA AI is the first AI ghost that automates Twitter (X) logins like a human, bypassing security measures and solving reCAPTCHAs silently. This repository contains a TensorFlow.js-based convolutional neural network (CNN) designed to classify Twitter reCAPTCHA seating arrangement screenshots as "correct" or "incorrect," ensuring INSTA AI's automation can validate successful solutions to challenges like "move the person to the indicated seat."
 
 ## Project Overview
 
-This model is tailored for RIONA AI's mission to mimic human behavior on Twitter, specifically targeting reCAPTCHA challenges that require seating a doll in a position matching a reference icon and letter (e.g., "The Doll must seat in the same row and column equivalent to the icon and letter"). The CNN processes images (128x128 pixels) from `data/correct` and `data/incorrect` directories, trains a binary classifier, and can be deployed as an HTTPS Express server to classify screenshots in real-time.
+This model is tailored for INSTA AI's mission to mimic human behavior on Twitter, specifically targeting reCAPTCHA challenges that require seating a doll in a position matching a reference icon and letter (e.g., "The Doll must seat in the same row and column equivalent to the icon and letter"). The CNN processes images (128x128 pixels) from `data/correct` and `data/incorrect` directories, trains a binary classifier, and can be deployed as an HTTPS Express server to classify screenshots in real-time.
 
 ### Features
 
@@ -43,7 +43,7 @@ This model is tailored for RIONA AI's mission to mimic human behavior on Twitter
 
 1. **Clone the Repository**:
    ```bash
-   git clone https://github.com/RIONA-ai/recaptcha-classifier.git
+   git clone https://github.com/iastrebd-cyber/recaptcha-classifier.git
    cd recaptcha-classifier
    ```
 2. **Install Dependencies**:
@@ -161,17 +161,17 @@ curl -X POST http://localhost:3000/classify \
 }
 ```
 
-## Integration with RIONA AI
+## Integration with INSTA AI
 
-This model is designed to integrate with RIONA AI's reCAPTCHA-solving pipeline:
+This model is designed to integrate with INSTA AI's reCAPTCHA-solving pipeline:
 
 - **Input**: Screenshots of Twitter reCAPTCHA seating challenges.
 - **Output**: Binary classification ("CORRECT" or "INCORRECT") with a confidence score.
-- **Deployment**: Use the server mode to provide real-time classification via the `/classify` endpoint, integrating with RIONA AI's automation system.
+- **Deployment**: Use the server mode to provide real-time classification via the `/classify` endpoint, integrating with INSTA AI's automation system.
 
 ## Contributing
 
-We welcome contributions to enhance RIONA AI's reCAPTCHA classification capabilities! To contribute:
+We welcome contributions to enhance INSTA AI's reCAPTCHA classification capabilities! To contribute:
 
 1. Fork the repository.
 2. Create a feature branch (`git checkout -b feature/your-feature`).
@@ -192,25 +192,21 @@ Please follow the [Code of Conduct](CODE_OF_CONDUCT.md) and ensure your code adh
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
-## About RIONA AI
+## About INSTA AI
 
-RIONA AI is the first AI ghost that hacks Twitter like a human, automating logins, bypassing reCAPTCHA, and providing visual proof of access. Powered by blockchain and advanced human mimicry technology, RIONA AI operates seamlessly across web, Windows, and macOS platforms.
+INSTA AI is the first AI ghost that hacks Twitter like a human, automating logins, bypassing reCAPTCHA, and providing visual proof of access. Powered by blockchain and advanced human mimicry technology, INSTA AI operates seamlessly across web, Windows, and macOS platforms.
 
-- **Website**: [rionazi.xyz](https://www.rionaai.xyz)
-- **Email**: [support@rionaai.xyz](mailto:support@rionaai.xyz)
-- **Twitter**: Follow us on [Twitter](https://twitter.com/RIONA-ai)
-- **Telegram**: Join our [Telegram Community](https://t.me/rionaAicommunitiy)
-- **GitHub**: [RIONA AI Organization](https://github.com/RIONA-ai)
+- **GitHub**: [iastrebd-cyber](https://github.com/iastrebd-cyber/insta-ai-agent)
 
 ## Acknowledgments
 
 - Built with [TensorFlow.js](https://www.tensorflow.org/js).
 - Image processing powered by [node-canvas](https://github.com/Automattic/node-canvas).
 - Server powered by [Express](https://expressjs.com/).
-- Inspired by the RIONA AI mission to push the boundaries of AI automation.
+- Inspired by the INSTA AI mission to push the boundaries of AI automation.
 
 ## Stay Updated
 
-Subscribe to our newsletter at [rionazi.xyz](https://www.rionaai.xyz/) for updates on RIONA AI and this project.
+Subscribe to our newsletter at [instazi.xyz](https://www.instaai.xyz/) for updates on INSTA AI and this project.
 
-© 2025 RIONA AI. All rights reserved.
+© 2025 INSTA AI. All rights reserved.

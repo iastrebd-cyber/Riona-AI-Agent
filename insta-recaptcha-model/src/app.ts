@@ -20,7 +20,7 @@ app.use('/model', express.static(CONFIG.PATHS.MODEL_DIR));
 
 // Serve Admin Dashboard
 app.use('/admin', express.static(path.join(CONFIG.PATHS.ROOT, 'public/admin')));
-app.use('/riona', express.static(path.join(CONFIG.PATHS.ROOT, 'public/riona')));
+app.use('/insta', express.static(path.join(CONFIG.PATHS.ROOT, 'public/insta')));
 app.use('/debug', express.static(CONFIG.PATHS.DEBUG_DIR));
 app.use('/uploads', express.static(path.join(CONFIG.PATHS.ROOT, 'public/uploads')));
 
@@ -47,7 +47,7 @@ const server = {
             httpServer.listen(CONFIG.PORT, () => {
                 logger.info(`Server running on http://localhost:${CONFIG.PORT}`);
                 logger.info(`Admin Dashboard: http://localhost:${CONFIG.PORT}/admin`);
-                logger.info(`riona Dashboard: http://localhost:${CONFIG.PORT}/riona`);
+                logger.info(`insta Dashboard: http://localhost:${CONFIG.PORT}/insta`);
                 resolve();
             });
         });

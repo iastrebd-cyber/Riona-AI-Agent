@@ -1,4 +1,4 @@
-# Riona reCAPTCHA model
+# Insta reCAPTCHA model
 
 This model is integrated into the main repo and run via root npm scripts.
 
@@ -18,4 +18,4 @@ npm run recaptcha:build
 npm run recaptcha:serve
 ```
 
-Config lives in `riona-recaptcha-model/src/config`.
+Config lives in `insta-recaptcha-model/src/config`.

@@ -10,7 +10,7 @@ import logger from '@/utils/logger';
 import fs from 'fs';
 import path from 'path';
 
-class rionaOrchestrator {
+class instaOrchestrator {
     private isRunning: boolean = false;
     private currentErrand: string = "";
     private currentCycle: number = 0;
@@ -127,7 +127,7 @@ I have just taken this screenshot. What is my next move? If I see a specific "se
 
     private generateSystemPrompt(directives: string = "", knowledge: string = ""): string {
         return `
-            You are riona AI, a human-like agent operating on Twitter (X).
+            You are insta AI, a human-like agent operating on Twitter (X).
             Your goal is to execute errands while mimicking human behavior perfectly.
             
             PERSONALITY & DIRECTIVES:
@@ -199,4 +199,4 @@ I have just taken this screenshot. What is my next move? If I see a specific "se
     }
 }
 
-export default new rionaOrchestrator();
+export default new instaOrchestrator();

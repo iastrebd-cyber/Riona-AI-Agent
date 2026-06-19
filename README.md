@@ -1,28 +1,28 @@
 
-# Riona AI Agent
+# Insta AI Agent
 
-[Website](https://www.agentriona.xyz) | [Roadmap](ROADMAP.md) | [Twitter](https://twitter.com/david_patrick01) | [Contact](mailto:davidchuksdev@gmail.com)
+[Roadmap](ROADMAP.md) | [GitHub](https://github.com/iastrebd-cyber/insta-ai-agent)
 
 <p align="center">
-  <img src="riona.png" alt="Riona AI Agent banner" width="100%" />
+  <img src="insta.png" alt="Insta AI Agent banner" width="100%" />
 </p>
 
-Riona AI Agent is an AI-powered social automation platform for Instagram and X/Twitter. It combines browser automation, AI-generated content, account workflows, scheduling, engagement actions, and training inputs so you can run a social media operator from one codebase.
+Insta AI Agent is an AI-powered social automation platform for Instagram and X/Twitter. It combines browser automation, AI-generated content, account workflows, scheduling, engagement actions, and training inputs so you can run a social media operator from one codebase.
 
 ## Overview
 
-Riona is built to automate social activity while keeping control surfaces explicit. The project includes:
+Insta is built to automate social activity while keeping control surfaces explicit. The project includes:
 
 - Instagram automation for login, posting, liking, commenting, messaging, and follower scraping
 - X/Twitter support in progress for publishing and engagement workflows
 - AI content generation using Gemini for captions and comments
 - Training inputs from YouTube, audio, files, and websites
 - API endpoints, health checks, dashboards, cooldowns, summaries, and logging
-- A separate reCAPTCHA ML subproject under `riona-recaptcha-model/`
+- A separate reCAPTCHA ML subproject under `insta-recaptcha-model/`
 
 ## Quick Links
 
-- Live website: `https://www.agentriona.xyz`
+- Repository: `https://github.com/iastrebd-cyber/insta-ai-agent`
 - Project roadmap: `ROADMAP.md`
 
 If you'd like to support the project, see the private donations file maintained locally.
@@ -56,8 +56,8 @@ Before running automation, you can shape the agent with:
 1. **Clone the repository**:
 
    ```sh
-   git clone https://github.com/david-patrick-chuks/riona-ai-agent.git
-   cd riona-ai-agent
+   git clone https://github.com/iastrebd-cyber/insta-ai-agent.git
+   cd insta-ai-agent
    ```
 
 2. **Install dependencies**:
@@ -217,7 +217,7 @@ Open `http://localhost:3000/dashboard` for live status and the last IG run summa
 
 ## reCAPTCHA Model
 
-This repo now includes the reCAPTCHA model under `riona-recaptcha-model/` and is run via root scripts:
+This repo now includes the reCAPTCHA model under `insta-recaptcha-model/` and is run via root scripts:
 
 - `npm run recaptcha:dev`
 - `npm run recaptcha:train`
@@ -298,19 +298,18 @@ This project is licensed under the MIT License. See the LICENSE file for details
 ## Stargazers
 Thank you to all our supporters!
 
-[![Star History Chart](https://api.star-history.com/svg?repos=David-patrick-chuks/Riona-AI-Agent&type=Date)](https://www.star-history.com/#David-patrick-chuks/Riona-AI-Agent&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=iastrebd-cyber/Insta-AI-Agent&type=Date)](https://www.star-history.com/#iastrebd-cyber/Insta-AI-Agent&Date)
 
 ## 
 
 <p align="center">
-Built with ❤️ by David Patrick 
+Built with ❤️ by iastrebd-cyber
 </p>
 
 ## Community & Contact
 
 - GitHub Discussions: use the Discussions tab for Q&A
 - Issues: bug reports and feature requests
-- Twitter: @david_patrick01
-- Email: davidchuksdev@gmail.com
+- GitHub: https://github.com/iastrebd-cyber/insta-ai-agent
 
 Real-time chat is not set up yet. If you want a Discord server, open a discussion and we can spin it up based on interest.

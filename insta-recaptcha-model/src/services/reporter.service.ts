@@ -23,7 +23,7 @@ class ReporterService {
         details?: any;
     }) {
         if (this.io) {
-            this.io.emit('riona_update', {
+            this.io.emit('insta_update', {
                 ...data,
                 timestamp: new Date()
             });
