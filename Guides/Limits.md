@@ -49,7 +49,7 @@ and the per-engine getters in `src/client/IG-bot/IgClient.ts`.
 **Welcome-DM is the riskiest engine** (DMs). It only messages people who NEWLY
 followed us (diff vs a stored baseline). The **first run only seeds the baseline
 and sends nothing**. Spam/bot follower handles are skipped, every recipient is
-de-duped (`data/igWelcomedFollowers.json`), and `IG_WELCOME_DRY_RUN=true`
+de-duped (`build/data/igWelcomedFollowers.json`), and `IG_WELCOME_DRY_RUN=true`
 previews without sending.
 
 Story **reactions** are a DM-like action — keep `IG_STORY_REACT=false` during
@@ -65,7 +65,7 @@ warm-up. When enabled later, cap with `IG_STORY_MAX_REACTIONS`.
 `handleActionBlock()` runs in all four engines (feed, growth, replies, stories).
 It scans the page for Instagram's rate-limit dialog ("Action Blocked", "Try
 Again Later", "we restrict certain activity", etc.). The cooldown is shared
-state (`data/igCooldown.json`); every engine checks it before starting.
+state (`build/data/igCooldown.json`); every engine checks it before starting.
 
 ## Ramp-up to steady state
 
@@ -88,5 +88,11 @@ drop back to warm-up values and rest the account.
 
 - `.env` is gitignored — these values are local to each machine. This file
   documents the intended configuration; the code ships safe defaults.
-- Daily counters reset by calendar day (`data/igActionData.json`).
+- Daily counters reset by calendar day (`build/data/igActionData.json`).
 - Story views do not increment the daily counter (passive, low-risk).
+- **State files live under `build/data/`, not the repo-root `data/`.** The code
+  resolves them via `path.join(__dirname, "../data/...")` and `__dirname` at
+  runtime is `build/utils`, so the live files are `build/data/igActionData.json`,
+  `igCooldown.json`, `igKnownFollowers.json`, `igWelcomedFollowers.json`,
+  `igRepliedComments.json`. Check `build/data/igActionData.json` to see how much
+  of the daily cap is already spent — the root `data/` is unused by the build.
