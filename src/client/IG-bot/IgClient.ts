@@ -305,6 +305,40 @@ export class IgClient {
         }
     }
 
+    // Detects Instagram's "Action Blocked" / "Try Again Later" rate-limit wall.
+    // When seen, sets a long cooldown so callers stop acting immediately — the
+    // single most important guard against escalating a soft block into a ban.
+    // Returns true if a block was detected (and a cooldown was set).
+    private async handleActionBlock(): Promise<boolean> {
+        if (!this.page) return false;
+        let blocked = false;
+        try {
+            blocked = await this.page.evaluate(() => {
+                const body = document.body ? document.body.innerText : "";
+                return /action blocked|we restrict certain activity|try again later|we limit how often|temporarily blocked|you[’']?re temporarily|restricted from/i.test(body);
+            });
+        } catch {
+            return false;
+        }
+        if (blocked) {
+            const mins = getNumberEnv("IG_BLOCK_COOLDOWN_MINUTES", 180);
+            await setIgCooldown(mins);
+            logger.error(`Instagram "Action Blocked" wall detected — set ${mins} min cooldown and stopping this run.`);
+            try {
+                await this.page.screenshot({ path: "./cookies/action-block.png" });
+            } catch { /* ignore */ }
+            // Dismiss the dialog so the page is usable next time.
+            try {
+                await this.page.evaluate(() => {
+                    const btn = Array.from(document.querySelectorAll('button, div[role="button"]'))
+                        .find((b) => /^(ok|dismiss|got it|close|tell us)$/i.test((b.textContent || "").trim()));
+                    if (btn) (btn as HTMLElement).click();
+                });
+            } catch { /* ignore */ }
+        }
+        return blocked;
+    }
+
     // Wipes all browser cookies so a credentials login starts from a clean slate.
     // A poisoned session jar otherwise keeps 500-ing even on /accounts/login/.
     private async clearAllCookies(): Promise<void> {
@@ -1068,6 +1102,8 @@ export class IgClient {
                     }
                 }
                 summary.postsVisited++;
+                // Stop immediately if IG threw up an action-block wall.
+                if (await this.handleActionBlock()) break;
                 if (dailyLimit > 0) {
                     const updated = await getIgDailyState();
                     if (updated.count >= dailyLimit) {
@@ -1593,6 +1629,7 @@ export class IgClient {
                 summary.errors++;
                 logger.warn(`Engagement failed for @${target}.`);
             }
+            if (await this.handleActionBlock()) { logger.warn("Stopping growth run due to action block."); break; }
             const wait = Math.floor(Math.random() * (userDelayMax - userDelayMin + 1)) + userDelayMin;
             logger.info(`Waiting ${Math.round(wait / 1000)}s before next target...`);
             await delay(wait);
@@ -1664,7 +1701,9 @@ export class IgClient {
         const replyLabels = ['reply', 'ответить', 'odpowiedz', 'responder', 'répondre', 'antworten'];
         const postLabels = ['post', 'opublikuj', 'publish', 'опубликовать', 'отправить'];
 
+        let aborted = false;
         for (const link of postLinks) {
+            if (aborted) break;
             if (summary.repliesPosted >= maxPerRun) break;
             if (typeof getShouldExitInteractions === 'function' && getShouldExitInteractions()) break;
             const shortcode = link.split('/').filter(Boolean).pop() || link;
@@ -1783,6 +1822,7 @@ export class IgClient {
                     replied.add(key);
                     newlyReplied.push(key);
                     if (profile.dailyMaxActions > 0) await incrementIgDailyCount(1);
+                    if (await this.handleActionBlock()) { aborted = true; break; }
                     const wait = Math.floor(Math.random() * (delayMax - delayMin + 1)) + delayMin;
                     await delay(wait);
                 }
@@ -1901,6 +1941,7 @@ export class IgClient {
                 summary.errors++;
                 logger.warn(`Error on @${target}'s story.`);
             }
+            if (await this.handleActionBlock()) { logger.warn("Stopping story run due to action block."); break; }
             const wait = Math.floor(Math.random() * (delayMax - delayMin + 1)) + delayMin;
             await delay(wait);
         }
