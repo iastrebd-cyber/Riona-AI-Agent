@@ -328,6 +328,63 @@ export const addRepliedComments = async (keys: string[]): Promise<void> => {
   }
 };
 
+// ---------------------- Welcome-DM follower tracking ----------------------
+// Baseline snapshot of followers we've already accounted for (to detect NEW
+// ones) and the set we've already welcomed (never DM the same person twice).
+export const getKnownFollowers = async (): Promise<Set<string>> => {
+  const dataPath = path.join(__dirname, "../data/igKnownFollowers.json");
+  try {
+    const data = await fs.readFile(dataPath, "utf-8");
+    const json = JSON.parse(data);
+    return new Set(Array.isArray(json) ? json : []);
+  } catch {
+    return new Set();
+  }
+};
+
+export const saveKnownFollowers = async (users: string[]): Promise<void> => {
+  const dataPath = path.join(__dirname, "../data/igKnownFollowers.json");
+  try {
+    await fs.mkdir(path.dirname(dataPath), { recursive: true });
+    await fs.writeFile(dataPath, JSON.stringify(Array.from(new Set(users)), null, 2));
+  } catch (error) {
+    logger.error("Error writing igKnownFollowers:", error);
+  }
+};
+
+export const getWelcomedFollowers = async (): Promise<Set<string>> => {
+  const dataPath = path.join(__dirname, "../data/igWelcomedFollowers.json");
+  try {
+    const data = await fs.readFile(dataPath, "utf-8");
+    const json = JSON.parse(data);
+    const keys: string[] = Array.isArray(json) ? json.map((e: any) => (typeof e === "string" ? e : e.key)) : [];
+    return new Set(keys.filter(Boolean));
+  } catch {
+    return new Set();
+  }
+};
+
+export const addWelcomedFollowers = async (users: string[]): Promise<void> => {
+  if (!users.length) return;
+  const dataPath = path.join(__dirname, "../data/igWelcomedFollowers.json");
+  let existing: any[] = [];
+  try {
+    const parsed = JSON.parse(await fs.readFile(dataPath, "utf-8"));
+    if (Array.isArray(parsed)) existing = parsed;
+  } catch {
+    existing = [];
+  }
+  const now = Date.now();
+  const seen = new Set(existing.map((e: any) => (typeof e === "string" ? e : e.key)));
+  for (const u of users) if (!seen.has(u)) existing.push({ key: u, at: now });
+  try {
+    await fs.mkdir(path.dirname(dataPath), { recursive: true });
+    await fs.writeFile(dataPath, JSON.stringify(existing, null, 2));
+  } catch (error) {
+    logger.error("Error writing igWelcomedFollowers:", error);
+  }
+};
+
 // ---------------------- Scraped data utilities ----------------------
 export const saveScrapedData = async (link: string, content: string): Promise<void> => {
   const scrapedDataPath = path.join(__dirname, "../data/scrapedData.json");

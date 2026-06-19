@@ -6,7 +6,7 @@ import UserAgent from "user-agents";
 import { Server } from "proxy-chain";
 import { IGpassword, IGusername } from "../../secret";
 import logger from "../../config/logger";
-import { Instagram_cookiesExist, loadCookies, saveCookies, getIgDailyState, incrementIgDailyCount, getIgCooldown, setIgCooldown, getRepliedComments, addRepliedComments } from "../../utils";
+import { Instagram_cookiesExist, loadCookies, saveCookies, getIgDailyState, incrementIgDailyCount, getIgCooldown, setIgCooldown, getRepliedComments, addRepliedComments, getKnownFollowers, saveKnownFollowers, getWelcomedFollowers, addWelcomedFollowers } from "../../utils";
 import { getIgProfile } from "../../config/igProfile";
 import { getNumberEnv, getBoolEnv } from "../../utils/env";
 import path from "path";
@@ -1370,85 +1370,76 @@ export class IgClient {
     async scrapeFollowers(targetAccount: string, maxFollowers: number) {
         if (!this.page) throw new Error("Page not initialized");
         const page = this.page;
+        const owner = targetAccount.toLowerCase().replace(/^@/, '');
         try {
-            // Navigate to the target account's followers page
-            await page.goto(`https://www.instagram.com/${targetAccount}/followers/`, {
-                waitUntil: "networkidle2",
-            });
-            console.log(`Navigated to ${targetAccount}'s followers page`);
-
-            // Wait for the followers modal to load (try robustly)
-            try {
-                await page.waitForSelector('div a[role="link"] span[title]');
-            } catch {
-                // fallback: wait for dialog
-                await page.waitForSelector('div[role="dialog"]');
+            // Open the followers modal by CLICKING the followers link on the
+            // profile. Direct-navigating to /<user>/followers/ does NOT render the
+            // modal in the current IG redesign (it just shows the profile).
+            await page.goto(`https://www.instagram.com/${owner}/`, { waitUntil: "networkidle2" });
+            await this.dismissCookieConsent();
+            await delay(2000); // let the header hydrate
+            const opened = await page.evaluate((user) => {
+                // Prefer the canonical followers link…
+                let el: HTMLElement | null =
+                    (document.querySelector(`a[href="/${user}/followers/"]`) as HTMLElement) ||
+                    (document.querySelector('a[href$="/followers/"]') as HTMLElement);
+                // …otherwise click whatever shows the "followers" count (the
+                // redesign sometimes uses a button/span, not an <a>).
+                if (!el) {
+                    const cand = Array.from(document.querySelectorAll('a, div[role="button"], button, span'))
+                        .find((e) => /followers/i.test(e.textContent || '') && (e.textContent || '').length < 40);
+                    el = cand ? ((cand.closest('a, div[role="button"], button') as HTMLElement) || (cand as HTMLElement)) : null;
+                }
+                if (el) { el.click(); return true; }
+                return false;
+            }, owner);
+            if (!opened) {
+                logger.warn(`Could not find the followers link/count on @${owner}.`);
+                return [];
             }
-            console.log("Followers modal loaded");
+            await page.waitForSelector('div[role="dialog"] a[href^="/"]', { timeout: 15000 }).catch(() => {});
+            console.log("Followers modal opened");
 
-            const followers: string[] = [];
-            let previousHeight = 0;
-            let currentHeight = 0;
-            // Scroll and collect followers until we reach the desired amount or can't scroll anymore
-            while (followers.length < maxFollowers) {
-                // Get all follower links in the current view
-                const newFollowers = await page.evaluate(() => {
-                    // Scope to the followers modal — querying the whole page picks
-                    // up nav/sidebar/story links (reels/, direct/, stories/...) and
-                    // even our own handle, not actual followers.
+            const reserved = ['p', 'reel', 'reels', 'explore', 'accounts', 'direct', 'stories', 'about', 'legal', 'privacy', 'developer', 'ads'];
+            const collect = async (): Promise<string[]> =>
+                page.evaluate((ownerName, reservedList) => {
                     const dialog = document.querySelector('div[role="dialog"]');
-                    const scope: ParentNode = dialog || document;
-                    const reserved = ['p', 'reel', 'reels', 'explore', 'accounts', 'direct', 'stories', 'about', 'legal', 'privacy', 'developer', 'ads'];
+                    if (!dialog) return [];
                     const out = new Set<string>();
-                    scope.querySelectorAll('a[href^="/"]').forEach((a) => {
-                        const href = (a.getAttribute('href') || '').split('?')[0];
-                        const parts = href.split('/').filter(Boolean);
-                        // Real follower rows link to a single-segment profile path.
-                        if (parts.length === 1 && !reserved.includes(parts[0])) {
+                    dialog.querySelectorAll('a[href^="/"]').forEach((a) => {
+                        const parts = (a.getAttribute('href') || '').split('?')[0].split('/').filter(Boolean);
+                        if (parts.length === 1 && parts[0] !== ownerName && !reservedList.includes(parts[0])) {
                             out.add(parts[0]);
                         }
                     });
                     return Array.from(out);
-                });
+                }, owner, reserved);
 
-                // Add new unique followers to our list
-                for (const follower of newFollowers) {
-                    if (!followers.includes(follower) && followers.length < maxFollowers) {
-                        followers.push(follower);
-                        console.log(`Found follower: ${follower}`);
-                    }
-                }
-
-                // Scroll the followers modal
+            const followers = new Set<string>();
+            let stagnant = 0;
+            // Scroll the modal's inner scrollable container (the dialog itself
+            // isn't the scroller) until the list stops growing or we hit the cap.
+            for (let i = 0; i < 60 && followers.size < maxFollowers && stagnant < 3; i++) {
+                const before = followers.size;
+                (await collect()).forEach((u) => followers.add(u));
                 await page.evaluate(() => {
                     const dialog = document.querySelector('div[role="dialog"]');
-                    if (dialog) {
-                        dialog.scrollTop = dialog.scrollHeight;
-                    }
+                    if (!dialog) return;
+                    const scroller = Array.from(dialog.querySelectorAll('div'))
+                        .find((d) => d.scrollHeight > d.clientHeight + 50);
+                    if (scroller) scroller.scrollTop = scroller.scrollHeight;
                 });
-
-                // Wait for potential new content to load
-                await delay(1000);
-
-                // Check if we've reached the bottom
-                currentHeight = await page.evaluate(() => {
-                    const dialog = document.querySelector('div[role="dialog"]');
-                    return dialog ? dialog.scrollHeight : 0;
-                });
-
-                if (currentHeight === previousHeight) {
-                    console.log("Reached the end of followers list");
-                    break;
-                }
-
-                previousHeight = currentHeight;
+                await delay(1200);
+                stagnant = followers.size > before ? 0 : stagnant + 1;
             }
+            (await collect()).forEach((u) => followers.add(u));
 
-            console.log(`Successfully scraped ${followers.length} followers`);
-            return followers.slice(0, maxFollowers);
+            const result = Array.from(followers).slice(0, maxFollowers);
+            console.log(`Successfully scraped ${result.length} followers from @${owner}`);
+            return result;
         } catch (error) {
-            console.error(`Error scraping followers for ${targetAccount}:`, error);
-            throw error;
+            console.error(`Error scraping followers for ${owner}:`, error);
+            return [];
         }
     }
 
@@ -1953,6 +1944,142 @@ export class IgClient {
         return summary;
     }
 
+    // ===== Welcome-DM to NEW followers ====================================
+    // Sends a warm, varied, non-salesy DM to people who NEWLY followed us
+    // (diff of current followers vs a stored baseline). DMs are the riskiest
+    // action, so: own followers only, strict per-run cap, long delays, dedupe,
+    // spam-handle skip, action-block guard, DRY_RUN, and — critically — the
+    // FIRST run only seeds the baseline and sends nothing.
+    private static WELCOME_TEMPLATES = [
+        "Hey, thanks so much for the follow! Really glad to have you here 🙏",
+        "Thank you for following! Hope you enjoy the art ✨",
+        "Hey! Thanks for the follow — happy to have you along 🙌",
+        "Thanks for following, it means a lot 🤍",
+        "Welcome, and thank you for the follow! 🎨",
+    ];
+
+    async welcomeNewFollowers(): Promise<any> {
+        if (!this.page) throw new Error("Page not initialized");
+        const username = (this.username || '').replace(/^@/, '');
+        if (!username) {
+            logger.warn("Own username unknown (set IGusername) — cannot welcome new followers.");
+            return null;
+        }
+        const cooldown = await getIgCooldown();
+        if (cooldown.until > Date.now()) {
+            logger.warn("IG cooldown active. Skipping welcome-DM run.");
+            return null;
+        }
+        if (!(await this.ensureHomeFeedReady().catch(() => false))) {
+            logger.warn("Feed not ready / not authenticated. Skipping welcome-DM run.");
+            return null;
+        }
+        const profile = getIgProfile();
+        const scan = getNumberEnv("IG_WELCOME_SCAN", 50);
+        const maxPerRun = getNumberEnv("IG_WELCOME_MAX_PER_RUN", 5);
+        const delayMin = getNumberEnv("IG_WELCOME_DELAY_MIN_MS", 60000);
+        const delayMax = getNumberEnv("IG_WELCOME_DELAY_MAX_MS", 180000);
+        const dryRun = getBoolEnv("IG_WELCOME_DRY_RUN", false);
+
+        const startedAt = new Date();
+        const summary = {
+            startedAt: startedAt.toISOString(), finishedAt: '', durationMs: 0,
+            scanned: 0, knownBefore: 0, newDetected: 0, sent: 0, skippedSpam: 0, seeded: false, errors: 0,
+        };
+
+        // Read our current followers.
+        let current: string[] = [];
+        try {
+            current = (await this.scrapeFollowers(username, scan)).map((u) => String(u).split('/')[0]).filter(Boolean);
+        } catch {
+            logger.warn("Could not read own followers list; skipping welcome-DM run.");
+            return summary;
+        }
+        current = Array.from(new Set(current.filter((u) => u.toLowerCase() !== username.toLowerCase())));
+        summary.scanned = current.length;
+
+        const known = await getKnownFollowers();
+        summary.knownBefore = known.size;
+
+        // FIRST RUN: no baseline yet → seed it and send NOTHING.
+        if (known.size === 0) {
+            if (dryRun) {
+                logger.info(`[DRY] Would seed baseline of ${current.length} followers (no DMs). Sample: ${current.slice(0, 15).join(', ')}`);
+                summary.seeded = true;
+                const finishedAtDry = new Date();
+                summary.finishedAt = finishedAtDry.toISOString();
+                summary.durationMs = finishedAtDry.getTime() - startedAt.getTime();
+                setLastRunSummary(summary as any);
+                return summary;
+            }
+            await saveKnownFollowers(current);
+            summary.seeded = true;
+            const finishedAtSeed = new Date();
+            summary.finishedAt = finishedAtSeed.toISOString();
+            summary.durationMs = finishedAtSeed.getTime() - startedAt.getTime();
+            setLastRunSummary(summary as any);
+            logger.info(`Welcome-DM: seeded baseline of ${current.length} followers — no DMs on first run. ${JSON.stringify(summary)}`);
+            return summary;
+        }
+
+        const welcomed = await getWelcomedFollowers();
+        const newFollowers = current.filter((u) => !known.has(u));
+        summary.newDetected = newFollowers.length;
+        const candidates = newFollowers.filter((u) => !welcomed.has(u));
+
+        const processed: string[] = []; // accounted for this run → fold into baseline
+        const welcomedNew: string[] = [];
+        for (const user of candidates) {
+            if (summary.sent >= maxPerRun) break;
+            if (typeof getShouldExitInteractions === 'function' && getShouldExitInteractions()) break;
+            // Skip obvious spam/bot followers (don't spend DM budget on them).
+            if (looksLikeSpamComment(user, '')) {
+                summary.skippedSpam++;
+                processed.push(user);
+                continue;
+            }
+            const daily = await getIgDailyState();
+            if (profile.dailyMaxActions > 0 && daily.count >= profile.dailyMaxActions) {
+                logger.warn(`Daily action limit reached (${daily.count}/${profile.dailyMaxActions}). Stopping welcome-DM run.`);
+                break;
+            }
+            const msg = IgClient.WELCOME_TEMPLATES[Math.floor(Math.random() * IgClient.WELCOME_TEMPLATES.length)];
+            if (dryRun) {
+                logger.info(`[DRY] Would welcome-DM @${user}: "${msg}"`);
+                summary.sent++;
+                continue; // don't send, don't persist (so a real run still catches them)
+            }
+            try {
+                await this.sendDirectMessage(user, msg);
+                summary.sent++;
+                welcomedNew.push(user);
+                processed.push(user);
+                if (profile.dailyMaxActions > 0) await incrementIgDailyCount(1);
+                logger.info(`Welcomed @${user} (${summary.sent}/${maxPerRun}).`);
+            } catch {
+                summary.errors++;
+                logger.warn(`Failed to DM @${user}.`);
+            }
+            if (await this.handleActionBlock()) { logger.warn("Stopping welcome-DM run due to action block."); break; }
+            const wait = Math.floor(Math.random() * (delayMax - delayMin + 1)) + delayMin;
+            await delay(wait);
+        }
+
+        if (!dryRun) {
+            // Fold only the users we actually accounted for into the baseline so
+            // leftover new followers (beyond the cap) are caught next run.
+            await addWelcomedFollowers(welcomedNew);
+            await saveKnownFollowers([...known, ...processed]);
+        }
+
+        const finishedAt = new Date();
+        summary.finishedAt = finishedAt.toISOString();
+        summary.durationMs = finishedAt.getTime() - startedAt.getTime();
+        setLastRunSummary(summary as any);
+        logger.info(`Welcome-DM run summary: ${JSON.stringify(summary)}`);
+        return summary;
+    }
+
     public async close() {
         if (this.browser) {
             // In CDP mode the browser is the user's own Chrome — only detach.
@@ -1995,6 +2122,14 @@ export async function engageAudienceStoriesHandler() {
     const client = new IgClient(IGusername, IGpassword);
     await client.init();
     const result = await client.engageAudienceStories();
+    await client.close();
+    return result;
+}
+
+export async function welcomeNewFollowersHandler() {
+    const client = new IgClient(IGusername, IGpassword);
+    await client.init();
+    const result = await client.welcomeNewFollowers();
     await client.close();
     return result;
 }

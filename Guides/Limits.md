@@ -44,6 +44,13 @@ and the per-engine getters in `src/client/IG-bot/IgClient.ts`.
 | Growth source | `IG_GROWTH_SOURCE` | `commenters` |
 | Replies (`run-replies.js`) | `IG_REPLY_MAX_PER_RUN` / `IG_REPLY_MAX_PER_POST` / `IG_REPLY_STRICT_SPAM` | 2 / 1 / `true` |
 | Stories (`run-stories.js`) | `IG_STORY_MAX_TARGETS` / `IG_STORY_REACT` | 20 / `false` (view-only) |
+| Welcome-DM (`run-welcome.js`) | `IG_WELCOME_MAX_PER_RUN` / `IG_WELCOME_DELAY_MIN_MS`–`MAX_MS` | 5 / 60–180s |
+
+**Welcome-DM is the riskiest engine** (DMs). It only messages people who NEWLY
+followed us (diff vs a stored baseline). The **first run only seeds the baseline
+and sends nothing**. Spam/bot follower handles are skipped, every recipient is
+de-duped (`data/igWelcomedFollowers.json`), and `IG_WELCOME_DRY_RUN=true`
+previews without sending.
 
 Story **reactions** are a DM-like action — keep `IG_STORY_REACT=false` during
 warm-up. When enabled later, cap with `IG_STORY_MAX_REACTIONS`.
