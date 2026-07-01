@@ -139,6 +139,9 @@ chrome-profile/
 # Playwright MCP scratch dir
 .playwright-mcp/
 
+# Local session log dumps from manual agent runs
+logs-grow-*.txt
+
 # Local-only diagnostic / one-off runner scripts (not part of the app)
 diag-cdp.js
 diag-login.js
