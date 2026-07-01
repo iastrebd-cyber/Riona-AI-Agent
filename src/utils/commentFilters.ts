@@ -103,6 +103,27 @@ export const looksLikeSpamComment = (author: string, text: string): boolean => {
   return false;
 };
 
+// Language gate for ENGAGING a comment (liking/replying). We only engage
+// comments written predominantly in Latin (English) or Cyrillic (Russian)
+// script. Comments dominated by Arabic or CJK (Chinese/Japanese/Korean) are
+// skipped — we don't want to like content we can't read/moderate. A comment
+// with no letters at all (pure emoji/punctuation) is treated as engageable,
+// since liking it is harmless. Disable the whole gate with
+// IG_ENGAGE_LANG_FILTER=false.
+export const isSupportedCommentLanguage = (text: string): boolean => {
+  if ((process.env.IG_ENGAGE_LANG_FILTER || 'true').toLowerCase() === 'false') return true;
+  const t = text || '';
+  const latin = (t.match(/[A-Za-z]/g) || []).length;
+  const cyrillic = (t.match(/[Ѐ-ӿ]/g) || []).length;
+  const arabic = (t.match(/[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]/g) || []).length;
+  // Hiragana/Katakana, CJK ideographs, Hangul.
+  const cjk = (t.match(/[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯]/g) || []).length;
+  const supported = latin + cyrillic;
+  const unsupported = arabic + cjk;
+  if (unsupported === 0) return true;          // no Arabic/CJK present → fine
+  return supported >= unsupported;             // skip only if non-RU/EN dominates
+};
+
 export const shouldSkipComment = (comment: string, cfg: CommentFilterConfig): boolean => {
   if (!comment) return true;
 

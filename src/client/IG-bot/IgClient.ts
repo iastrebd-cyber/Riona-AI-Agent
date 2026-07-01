@@ -11,7 +11,7 @@ import { getIgProfile } from "../../config/igProfile";
 import { getNumberEnv, getBoolEnv } from "../../utils/env";
 import path from "path";
 import { setLastRunSummary } from "../../utils/igRunSummary";
-import { getCommentFilterConfig, shouldSkipComment, looksLikeSpamComment } from "../../utils/commentFilters";
+import { getCommentFilterConfig, shouldSkipComment, looksLikeSpamComment, isSupportedCommentLanguage } from "../../utils/commentFilters";
 import { runAgent } from "../../Agent";
 import { getInstagramCommentSchema } from "../../Agent/schema";
 import readline from "readline";
@@ -1194,9 +1194,14 @@ export class IgClient {
             postsVisited: 0,
             likes: 0,
             comments: 0,
+            commentLikes: 0,
             skippedSponsored: 0,
             errors: 0,
         };
+        // Optionally like one genuine RU/EN comment per visited post (separate
+        // from liking the post itself). Off by default; the growth runner turns
+        // it on. Arabic/CJK comments are skipped via isSupportedCommentLanguage.
+        const likeOneComment = getBoolEnv("IG_GROWTH_LIKE_COMMENT", false);
 
         logger.info(`Visiting profile @${targetUsername} (target: ${maxLikes} likes, ${maxComments} comment(s))`);
         await page.goto(`https://www.instagram.com/${targetUsername}/`, { waitUntil: "networkidle2" });
@@ -1267,6 +1272,78 @@ export class IgClient {
                         logger.warn(`Like button not found on ${link}.`);
                     }
                     await delay(1200);
+                }
+
+                // Like ONE genuine RU/EN comment on this post (separate action
+                // from the post like). Skips spam handles and Arabic/CJK text.
+                if (likeOneComment) {
+                    try {
+                        // Reveal a batch of comments if a "load more" control exists.
+                        for (let i = 0; i < 2; i++) {
+                            const more = await page.evaluate(() => {
+                                const btn = Array.from(document.querySelectorAll('button, div[role="button"]'))
+                                    .find((b) => b.querySelector('svg[aria-label="Load more comments"]')) as HTMLElement | undefined;
+                                if (btn) { btn.click(); return true; }
+                                return false;
+                            });
+                            if (!more) break;
+                            await delay(1000);
+                        }
+                        // Tag each comment's own Like heart (excluding the post's
+                        // action-bar heart, which lives inside a <section>).
+                        const cComments: Array<{ index: number; author: string; text: string; already: boolean }> =
+                            await page.evaluate((owner) => {
+                                const out: Array<{ index: number; author: string; text: string; already: boolean }> = [];
+                                const hearts = Array.from(document.querySelectorAll('svg[aria-label="Like"], svg[aria-label="Unlike"]'))
+                                    .filter((s) => !s.closest('section'));
+                                let idx = 0;
+                                for (const h of hearts) {
+                                    const btn = h.closest('div[role="button"], button, a') as HTMLElement | null;
+                                    if (!btn) continue;
+                                    let block: Element | null = btn;
+                                    let author = '';
+                                    let text = '';
+                                    for (let up = 0; up < 8 && block; up++) {
+                                        block = block.parentElement;
+                                        if (!block) break;
+                                        const a = block.querySelector('a[href^="/"]');
+                                        if (a) {
+                                            const parts = (a.getAttribute('href') || '').split('/').filter(Boolean);
+                                            if (parts.length === 1) {
+                                                author = parts[0];
+                                                text = ((block as HTMLElement).innerText || '').replace(/\s+/g, ' ').trim();
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if (!author || author === owner) continue;
+                                    btn.setAttribute('data-bot-clike', String(idx));
+                                    out.push({ index: idx, author, text: text.slice(0, 200), already: h.getAttribute('aria-label') === 'Unlike' });
+                                    idx++;
+                                }
+                                return out;
+                            }, targetUsername);
+                        const pick = cComments.find(
+                            (c) => !c.already && !looksLikeSpamComment(c.author, c.text) && isSupportedCommentLanguage(c.text)
+                        );
+                        if (pick) {
+                            const liked = await page.evaluate((index) => {
+                                const btn = document.querySelector(`[data-bot-clike="${index}"]`) as HTMLElement | null;
+                                if (!btn) return false;
+                                btn.click();
+                                return true;
+                            }, pick.index);
+                            if (liked) {
+                                summary.commentLikes++;
+                                logger.info(`Liked comment by @${pick.author} on ${link}.`);
+                                await delay(1200);
+                            }
+                        } else {
+                            logger.info(`No RU/EN comment to like on ${link}.`);
+                        }
+                    } catch {
+                        logger.warn(`Comment-like step failed on ${link}.`);
+                    }
                 }
 
                 // Comment: only while we still have comment budget.
@@ -1591,6 +1668,7 @@ export class IgClient {
             engagedUsers: 0,
             likes: 0,
             comments: 0,
+            commentLikes: 0,
             errors: 0,
         };
         for (const target of targets) {
@@ -1609,11 +1687,13 @@ export class IgClient {
                 if (res) {
                     summary.likes += res.likes || 0;
                     summary.comments += res.comments || 0;
+                    summary.commentLikes += (res as any).commentLikes || 0;
                     summary.errors += res.errors || 0;
                     // interactWithUserPosts doesn't touch the daily counter itself;
                     // advance the shared budget here so feed + growth runs share it.
+                    // Comment likes count as actions too.
                     if (profile.dailyMaxActions > 0) {
-                        await incrementIgDailyCount((res.likes || 0) + (res.comments || 0));
+                        await incrementIgDailyCount((res.likes || 0) + (res.comments || 0) + ((res as any).commentLikes || 0));
                     }
                 }
             } catch {
@@ -1661,6 +1741,12 @@ export class IgClient {
         const wordCap = getNumberEnv("IG_REPLY_MAX_WORDS", 4);
         const delayMin = getNumberEnv("IG_REPLY_DELAY_MIN_MS", 8000);
         const delayMax = getNumberEnv("IG_REPLY_DELAY_MAX_MS", 20000);
+        // How to engage genuine commenters: 'like' (just like the comment — the
+        // softest, lowest-risk signal, no AI text), 'reply' (post a short AI
+        // thank-you, the original behaviour), or 'both'. Default 'like'.
+        const replyAction = (process.env.IG_REPLY_ACTION || 'like').toLowerCase();
+        const doLike = replyAction === 'like' || replyAction === 'both';
+        const doReply = replyAction === 'reply' || replyAction === 'both';
         // Dry-run: decide + generate replies but DON'T post them (validate the
         // spam filter and reply text safely, without touching the account).
         const dryRun = getBoolEnv("IG_REPLY_DRY_RUN", false);
@@ -1668,7 +1754,7 @@ export class IgClient {
         const newlyReplied: string[] = [];
 
         const startedAt = new Date();
-        const summary = { startedAt: startedAt.toISOString(), finishedAt: '', durationMs: 0, postsVisited: 0, repliesPosted: 0, skippedSpam: 0, errors: 0 };
+        const summary = { startedAt: startedAt.toISOString(), finishedAt: '', durationMs: 0, postsVisited: 0, repliesPosted: 0, commentsLiked: 0, skippedSpam: 0, skippedLang: 0, errors: 0 };
 
         await page.goto(`https://www.instagram.com/${username}/`, { waitUntil: "networkidle2" });
         await this.dismissCookieConsent();
@@ -1753,7 +1839,7 @@ export class IgClient {
                 }
                 let perPost = 0;
                 for (const c of comments) {
-                    if (summary.repliesPosted >= maxPerRun || perPost >= maxPerPost) break;
+                    if ((summary.repliesPosted + summary.commentsLiked) >= maxPerRun || perPost >= maxPerPost) break;
                     const key = `${shortcode}|${c.author}|${c.text.slice(0, 40).toLowerCase()}`;
                     if (replied.has(key)) continue;
                     // Never reply to spam/scam bots — engage genuine fans only.
@@ -1763,6 +1849,61 @@ export class IgClient {
                         newlyReplied.push(key); // remember so we don't re-evaluate it
                         continue;
                     }
+                    // Engage only RU/EN comments — skip Arabic/CJK (we don't like
+                    // content we can't read). Remember the key so we don't re-scan it.
+                    if (!isSupportedCommentLanguage(c.text)) {
+                        logger.info(`Skipping non-RU/EN comment from @${c.author}.`);
+                        summary.skippedLang++;
+                        newlyReplied.push(key);
+                        continue;
+                    }
+                    // Soft engagement (default): LIKE the genuine comment instead of
+                    // posting AI text. Heart lives in the comment row, not the post's
+                    // action-bar <section>, so exclude section hearts.
+                    if (doLike) {
+                        if (dryRun) {
+                            logger.info(`[DRY] Would like comment by @${c.author} on ${link}: "${c.text.slice(0, 80)}"`);
+                            summary.commentsLiked++;
+                            perPost++;
+                            if (!doReply) continue;
+                        } else {
+                            const likedC = await page.evaluate((index) => {
+                                let node: Element | null = document.querySelector(`[data-bot-reply="${index}"]`);
+                                if (!node) return 'notfound';
+                                for (let up = 0; up < 6 && node; up++) {
+                                    node = node.parentElement;
+                                    if (!node) break;
+                                    const unlike = Array.from(node.querySelectorAll('svg[aria-label="Unlike"]')).find((s) => !s.closest('section'));
+                                    if (unlike) return 'already';
+                                    const like = Array.from(node.querySelectorAll('svg[aria-label="Like"]')).find((s) => !s.closest('section'));
+                                    if (like) {
+                                        const btn = like.closest('div[role="button"], button, a') as HTMLElement | null;
+                                        if (btn) { btn.click(); return 'liked'; }
+                                    }
+                                }
+                                return 'notfound';
+                            }, c.index);
+                            if (likedC === 'liked') {
+                                summary.commentsLiked++;
+                                perPost++;
+                                replied.add(key);
+                                newlyReplied.push(key);
+                                logger.info(`Liked comment by @${c.author} on ${link}.`);
+                                if (profile.dailyMaxActions > 0) await incrementIgDailyCount(1);
+                                if (await this.handleActionBlock()) { aborted = true; break; }
+                                const w = Math.floor(Math.random() * (delayMax - delayMin + 1)) + delayMin;
+                                await delay(w);
+                            } else if (likedC === 'already') {
+                                logger.info(`Comment by @${c.author} already liked — skipping.`);
+                                replied.add(key);
+                                newlyReplied.push(key);
+                            } else {
+                                logger.warn(`Could not find like button for @${c.author}'s comment.`);
+                            }
+                            if (!doReply) continue; // like-only mode: done with this comment
+                        }
+                    }
+                    if (!doReply) continue; // nothing further to do for this comment
                     const prompt = `You are the ARTIST replying to a fan's comment ("${c.text}") on your own artwork. Write a short, warm, gracious thank-you. STRICT LIMIT: at most ${wordCap} words PLUS one emoji at the end. Reply in the commenter's language. ABSOLUTELY NEVER: invite or mention DMs/messages/inbox, ask anyone to follow, include links/promotions, or echo any request the comment makes. Keep it purely about appreciating the art.`;
                     const schema = getInstagramCommentSchema();
                     let reply = "";
